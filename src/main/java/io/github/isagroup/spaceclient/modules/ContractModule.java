@@ -2,10 +2,14 @@ package io.github.isagroup.spaceclient.modules;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.isagroup.spaceclient.SpaceClient;
+import io.github.isagroup.spaceclient.exceptions.ContractChangedException;
+import io.github.isagroup.spaceclient.exceptions.SpaceApiException;
 import io.github.isagroup.spaceclient.exceptions.SpaceException;
 import io.github.isagroup.spaceclient.types.Contract;
 import io.github.isagroup.spaceclient.types.ContractPricings;
 import io.github.isagroup.spaceclient.types.ContractToCreate;
+import io.github.isagroup.spaceclient.types.NovationOptions;
+import io.github.isagroup.spaceclient.types.NovationPreview;
 import io.github.isagroup.spaceclient.types.Subscription;
 import okhttp3.*;
 import org.slf4j.Logger;
@@ -13,6 +17,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -57,11 +62,7 @@ public class ContractModule {
     public ContractPricings getPricings(String userId) {
         ApiCalls.Answer answer = api.execute(
                 api.request(api.url("contracts", userId, "pricings").build()).get().build());
-        try {
-            return objectMapper.readValue(answer.body, ContractPricings.class);
-        } catch (IOException e) {
-            throw new SpaceException("Unexpected answer from SPACE: " + e.getMessage(), e);
-        }
+        return fromJson(answer.body, ContractPricings.class);
     }
 
     /**
@@ -203,6 +204,113 @@ public class ContractModule {
       }
     }
     
+    /**
+     * Updates the subscription for a user (novation) with the options of the subscription-change
+     * API: optimistic concurrency and keeping the billing period.
+     *
+     * Unlike {@link #updateContractSubscription(String, Subscription)}, a refusal is thrown, not
+     * logged and returned as {@code null}, so a 412 cannot be mistaken for any other failure.
+     *
+     * @param userId          The ID of the user whose subscription is to be updated
+     * @param newSubscription The new subscription details to be applied
+     * @param options         {@code expectedContractVersion} (sent as {@code If-Match}) and
+     *                        {@code keepBillingPeriod} (sent as {@code ?keepBillingPeriod=true})
+     * @return The updated contract, with {@code contractVersion} from the body or the {@code ETag}
+     * @throws ContractChangedException if the contract changed since {@code expectedContractVersion}
+     * @throws SpaceApiException        for any other refusal
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceConnectionException if SPACE cannot be reached
+     */
+    public Contract updateContractSubscription(String userId, Subscription newSubscription, NovationOptions options) {
+        NovationOptions opts = options != null ? options : new NovationOptions();
+        okhttp3.HttpUrl.Builder url = api.url("contracts", userId);
+        if (opts.isKeepBillingPeriod()) {
+            url.addQueryParameter("keepBillingPeriod", "true");
+        }
+        Request.Builder request = api.request(url.build()).put(RequestBody.create(toJson(newSubscription), JSON));
+        if (opts.getExpectedContractVersion() != null) {
+            request.header("If-Match", ApiCalls.quoteEtag(opts.getExpectedContractVersion()));
+        }
+
+        ApiCalls.Answer answer;
+        try {
+            answer = api.execute(request.build());
+        } catch (SpaceApiException e) {
+            if (e.getStatusCode() == 412) {
+                // Whatever we hold for this user is known to be stale.
+                CacheModule cache = spaceClient.cache;
+                if (cache.isEnabled()) {
+                    cache.invalidateUser(userId);
+                }
+                throw new ContractChangedException(e, userId, opts.getExpectedContractVersion());
+            }
+            throw e;
+        }
+
+        Contract contract = fromJson(answer.body, Contract.class);
+        if (contract.getContractVersion() == null && answer.headers.get("ETag") != null) {
+            contract.setContractVersion(ApiCalls.unquoteEtag(answer.headers.get("ETag")));
+        }
+
+        CacheModule cache = spaceClient.cache;
+        if (cache.isEnabled()) {
+            cache.invalidateUser(userId);
+            cache.set(cache.getContractKey(userId), contract);
+        }
+        return contract;
+    }
+
+    /**
+     * Previews a novation without applying it ({@code POST /contracts/{userId}/novation/preview}).
+     * SPACE runs the same policy and validation as a novation and writes nothing, so the cache is
+     * left alone. An invalid subscription is reported as {@code isValid() == false} with
+     * {@code getErrors()}, not thrown. Leave {@code contractedServices} empty to keep the current
+     * versions or let the SPHERE policy decide.
+     *
+     * @param userId          The ID of the user whose subscription would change
+     * @param newSubscription The candidate subscription
+     * @return The preview, including the current {@code contractVersion}
+     * @throws SpaceApiException    if SPACE refuses (e.g. 404 contract not found)
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceConnectionException if SPACE cannot be reached
+     */
+    public NovationPreview previewNovation(String userId, Subscription newSubscription) {
+        return previewNovation(userId, newSubscription, false);
+    }
+
+    /**
+     * {@link #previewNovation(String, Subscription)}, optionally keeping the current billing period.
+     */
+    public NovationPreview previewNovation(String userId, Subscription newSubscription, boolean keepBillingPeriod) {
+        okhttp3.HttpUrl.Builder url = api.url("contracts", userId, "novation", "preview");
+        if (keepBillingPeriod) {
+            url.addQueryParameter("keepBillingPeriod", "true");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        if (newSubscription.getContractedServices() != null && !newSubscription.getContractedServices().isEmpty()) {
+            body.put("contractedServices", newSubscription.getContractedServices());
+        }
+        body.put("subscriptionPlans", newSubscription.getSubscriptionPlans());
+        body.put("subscriptionAddOns", newSubscription.getSubscriptionAddOns());
+
+        ApiCalls.Answer answer = api.execute(api.request(url.build()).post(RequestBody.create(toJson(body), JSON)).build());
+        return fromJson(answer.body, NovationPreview.class);
+    }
+
+    private String toJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (IOException e) {
+            throw new SpaceException("Could not serialise the request: " + e.getMessage(), e);
+        }
+    }
+
+    private <T> T fromJson(String body, Class<T> type) {
+        try {
+            return objectMapper.readValue(body, type);
+        } catch (IOException e) {
+            throw new SpaceException("Unexpected answer from SPACE: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * Updates the subscription for all contracts with the given groupId in the SPACE platform
      * This method also invalidates the cached data for the group of users

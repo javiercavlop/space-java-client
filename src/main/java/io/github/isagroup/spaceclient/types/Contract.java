@@ -41,6 +41,9 @@ public class Contract {
     
     @JsonProperty("history")
     private List<ContractHistoryEntry> history;
+
+    @JsonProperty("contractVersion")
+    private String contractVersion;
     
 
     public Contract() {
@@ -119,6 +122,19 @@ public class Contract {
         this.organizationId = organizationId;
     }
 
+    /**
+     * Opaque version of the contract (also sent as the {@code ETag} header). Pass it as the expected
+     * version of a novation to reject concurrent changes. {@code null} on SPACE versions without
+     * optimistic concurrency.
+     */
+    public String getContractVersion() {
+        return contractVersion;
+    }
+
+    public void setContractVersion(String contractVersion) {
+        this.contractVersion = contractVersion;
+    }
+
     public String getUserId() {
         return userContact != null ? userContact.getUserId() : null;
     }
@@ -132,6 +148,7 @@ public class Contract {
                 ", subscriptionPlans=" + subscriptionPlans +
                 ", subscriptionAddOns=" + subscriptionAddOns +
                 ", history=" + history +
+                ", contractVersion=" + contractVersion +
                 '}';
     }
 }
