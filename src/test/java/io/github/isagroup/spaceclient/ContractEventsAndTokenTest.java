@@ -44,10 +44,15 @@ class ContractEventsAndTokenTest {
     }
 
     private SpaceClient connect(boolean cache) {
+        return connect(cache, null);
+    }
+
+    private SpaceClient connect(boolean cache, String organizationId) {
         SpaceConnectionOptions options = new SpaceConnectionOptions("http://localhost:1", "org-key");
         if (cache) {
             options.setCache(new CacheOptions(true, CacheOptions.CacheType.BUILTIN, 300));
         }
+        options.setOrganizationId(organizationId);
         client = new SpaceClient(options);
         return client;
     }
@@ -103,6 +108,63 @@ class ContractEventsAndTokenTest {
 
         client.on("contract_created", data -> { });
         assertThat(client.contractSocketNamespace()).isSameAs(contracts);
+    }
+
+    @Test
+    @DisplayName("A member user key sends its organisation with the /contracts handshake")
+    void userKeyHandshakeHasOrganization() throws Exception {
+        connect(false, "org-1");
+
+        client.on("contract_novated", data -> { });
+
+        assertThat(authOf(client.contractSocketNamespace()))
+                .containsExactlyInAnyOrderEntriesOf(Map.of("apiKey", "org-key", "organizationId", "org-1"));
+    }
+
+    @Test
+    @DisplayName("A deletion carries a null contractVersion, and still invalidates the cache")
+    void deletionHasNullContractVersion() throws Exception {
+        connect(true);
+        client.cache.set(client.cache.getContractKey("u1"), new Contract());
+        List<Object> deleted = new ArrayList<>();
+        client.on("contract_deleted", deleted::add);
+        JSONObject message = event("CONTRACT_DELETED");
+        message.getJSONObject("details").put("contractVersion", JSONObject.NULL);
+
+        client.dispatchContractMessage(message);
+
+        ContractEventDetails details = (ContractEventDetails) deleted.get(0);
+        assertThat(details.getContractVersion()).isNull();
+        assertThat(details.getUserId()).isEqualTo("u1");
+        assertThat(client.cache.get(client.cache.getContractKey("u1"), Contract.class)).isNull();
+        // An omitted field reads the same way.
+        JSONObject omitted = event("CONTRACT_DELETED");
+        omitted.getJSONObject("details").remove("contractVersion");
+        assertThat(ContractEventDetails.fromJson(omitted.getJSONObject("details")).getContractVersion()).isNull();
+    }
+
+    @Test
+    @DisplayName("Listeners can be registered while events are being dispatched")
+    void concurrentRegistration() throws Exception {
+        connect(false);
+        Field field = SpaceClient.class.getDeclaredField("callbackFunctions");
+        field.setAccessible(true);
+        assertThat(field.get(client)).isInstanceOf(java.util.concurrent.ConcurrentHashMap.class);
+
+        List<Object> received = java.util.Collections.synchronizedList(new ArrayList<>());
+        client.on("contract_novated", received::add);
+        Thread registering = new Thread(() -> {
+            for (int i = 0; i < 2_000; i++) {
+                client.on(i % 2 == 0 ? "pricing_created" : "pricing_archived", data -> { });
+                client.removeListener("pricing_created");
+            }
+        });
+        registering.start();
+        for (int i = 0; i < 2_000; i++) {
+            client.dispatchContractMessage(event("CONTRACT_NOVATED"));
+        }
+        registering.join();
+        assertThat(received).hasSize(2_000);
     }
 
     @Test

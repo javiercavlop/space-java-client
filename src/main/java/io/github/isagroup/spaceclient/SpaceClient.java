@@ -33,6 +33,7 @@ public class SpaceClient {
 
     private final String httpUrl;
     private final String apiKey;
+    private final String organizationId;
     private final int timeout;
     
     private Socket socketClient;
@@ -49,7 +50,8 @@ public class SpaceClient {
             "contract_created", "contract_novated", "contract_deleted", "contract_renewed"
     ));
     
-    private final Map<String, Consumer<Object>> callbackFunctions = new HashMap<>();
+    // Registered from application threads, read from the socket.io event thread.
+    private final Map<String, Consumer<Object>> callbackFunctions = new java.util.concurrent.ConcurrentHashMap<>();
     
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -89,6 +91,7 @@ public class SpaceClient {
                 ? url.substring(0, url.length() - 1) + "/api/v1" 
                 : url + "/api/v1";
         this.apiKey = options.getApiKey();
+        this.organizationId = options.getOrganizationId();
         this.timeout = options.getTimeout();
 
         // Initialize ObjectMapper with JavaTimeModule for Date handling
@@ -218,7 +221,8 @@ public class SpaceClient {
 
     /**
      * Opens the authenticated {@code /contracts} namespace (creating and wiring it on first use).
-     * The API key goes in the socket.io {@code auth} payload: {@code {apiKey: "..."}}.
+     * The API key goes in the socket.io {@code auth} payload: {@code {apiKey: "..."}}, plus
+     * {@code organizationId} when configured (member user keys).
      */
     private synchronized void connectContractSocket() {
         if (socketClient == null) {
@@ -228,6 +232,10 @@ public class SpaceClient {
             io.socket.client.Manager.Options opts = new io.socket.client.Manager.Options();
             opts.auth = new HashMap<>();
             opts.auth.put("apiKey", apiKey);
+            if (organizationId != null && !organizationId.isEmpty()) {
+                // Member user keys act in an organisation they name.
+                opts.auth.put("organizationId", organizationId);
+            }
             contractSocketNamespace = socketClient.io().socket("/contracts", opts);
             contractSocketNamespace.on("message", args -> {
                 if (args.length > 0 && args[0] instanceof JSONObject) {

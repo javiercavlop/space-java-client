@@ -439,10 +439,13 @@ its original file. `getPricings` is never served from cache.
 `contract_created`, `contract_novated`, `contract_deleted` and `contract_renewed` arrive on the
 authenticated `/contracts` namespace, and only for contracts of the API key's organisation. The
 client opens it, sending the key as socket.io `auth: {apiKey: ...}`, when the first contract
-listener is registered, and closes it when the last one is removed. The callback receives a
-`ContractEventDetails` (`userId`, `organizationId`, `contractVersion`, `services`), after the
-user's cache entries have been invalidated. A key SPACE refuses is reported to the `error`
-listener.
+listener is registered, and closes it when the last one is removed. A member user key (`usr_...`)
+must also name its organisation: `options.setOrganizationId("org-1")` makes the handshake send
+`auth: {apiKey: ..., organizationId: "org-1"}`; organisation keys need nothing more. The callback
+receives a `ContractEventDetails` (`userId`, `organizationId`, `contractVersion`, `services`),
+after the user's cache entries have been invalidated; `getContractVersion()` is `null` for
+`contract_deleted`. A key SPACE refuses is reported to the `error` listener. Listeners may be
+registered and removed from any thread.
 
 ### Pricing Tokens
 

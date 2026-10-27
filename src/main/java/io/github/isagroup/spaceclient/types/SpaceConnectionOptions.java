@@ -20,6 +20,9 @@ public class SpaceConnectionOptions {
     @JsonProperty("cache")
     private CacheOptions cache;
 
+    @JsonProperty("organizationId")
+    private String organizationId;
+
     public SpaceConnectionOptions() {
     }
 
@@ -73,5 +76,18 @@ public class SpaceConnectionOptions {
 
     public void setCache(CacheOptions cache) {
         this.cache = cache;
+    }
+
+    /**
+     * The organisation of a member user key ({@code usr_...}). Sent with the handshake of the
+     * authenticated {@code /contracts} events namespace ({@code {apiKey, organizationId}}), which
+     * SPACE requires for user keys. Not needed for organisation keys.
+     */
+    public String getOrganizationId() {
+        return organizationId;
+    }
+
+    public void setOrganizationId(String organizationId) {
+        this.organizationId = organizationId;
     }
 }

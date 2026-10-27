@@ -39,10 +39,15 @@ public class ContractEventDetails {
             }
         }
         return new ContractEventDetails(
-                details.optString("userId", null),
-                details.optString("organizationId", null),
-                details.optString("contractVersion", null),
+                text(details, "userId"),
+                text(details, "organizationId"),
+                text(details, "contractVersion"),
                 services);
+    }
+
+    /** The field as a string; {@code null} when absent or JSON {@code null} (not {@code "null"}). */
+    private static String text(JSONObject details, String key) {
+        return details.isNull(key) ? null : details.optString(key, null);
     }
 
     public String getUserId() {
@@ -53,7 +58,7 @@ public class ContractEventDetails {
         return organizationId;
     }
 
-    /** The contract's version after the change ({@code null} for a deletion if SPACE omits it). */
+    /** The contract's version after the change; {@code null} for {@code contract_deleted}. */
     public String getContractVersion() {
         return contractVersion;
     }
