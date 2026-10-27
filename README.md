@@ -219,12 +219,71 @@ FeatureEvaluationResult result = client.features.evaluate(
     false  // server
 );
 
-// Revert evaluation (for failed transactions)
-boolean reverted = client.features.revertEvaluation("user123", "serviceA-featureX");
+// Give back exactly that consumption (for failed transactions); see "Consumption, Retries and
+// Idempotency-Key" below. revertEvaluation(userId, featureId) is deprecated.
+boolean reverted = client.features.revertConsumption("user123", "serviceA-featureX", result.getConsumptionId());
 
 // Generate pricing token
 String token = client.features.generateUserPricingToken("user123");
 ```
+
+### Consumption, Retries and Idempotency-Key
+
+Consumptions (`evaluate` with a consumption), reverts, contract creation, novations (single and by
+group) and usage level changes are writes that must not be applied twice when a request is retried
+after a timeout or a dropped connection. Each of these calls sends an `Idempotency-Key` header. On
+a SPACE with the `idempotency-key` capability, a request repeated with the same key gets the stored
+outcome of the first one (`Idempotent-Replayed: true`) and applies nothing; an older SPACE ignores
+the header. Evaluations without a consumption and reads carry no key.
+
+- **Generated keys.** By default the client creates a random UUID per call and reuses it for that
+  call's own retries, which covers retries inside one process.
+- **Your own key.** When the operation may be retried after the process restarts (a job queue, an
+  outbox, a message handler), create the key once, store it with the operation and pass it on every
+  attempt: `WriteOptions.withIdempotencyKey(key)`, or `NovationOptions.idempotencyKey(key)` for
+  `novate`. Use a new key for each new operation, and a new key after correcting a request SPACE
+  refused with a `4xx`. With a key of your own the client first checks that SPACE advertises
+  `idempotency-key` and throws `SpaceFeatureUnsupportedException` (`isWritten() == false`) if it
+  does not. A key that is not 1 to 255 characters is rejected with `IllegalArgumentException`.
+- **Retries** are off by default (`setRetries(0)`). With `options.setRetries(n)` (0 to 10) the
+  client retries those keyed writes, with the same key and the same request, after a
+  `SpaceConnectionException`, a `5xx` or a `409 IDEMPOTENCY_IN_PROGRESS`, and only while SPACE
+  advertises `idempotency-key` (without it each retry could be applied again). It waits
+  `Retry-After` when SPACE sends one (and stops if that is longer than `retryMaxDelayMs`), otherwise
+  an exponential backoff with jitter from `retryBaseDelayMs` (250 ms) up to `retryMaxDelayMs`
+  (10 s). Other `4xx` and requests without a key are never retried. (OkHttp's own transparent
+  retry of a failed connection, on by default, resends the same headers, key included.)
+- The overloads that take `WriteOptions` (and `novate`, `revertConsumption`) throw their failures;
+  the older overloads still log them and return `null` (`false`, or an evaluation whose
+  `getError().getCode()` is `IO_ERROR` or the idempotency code) as before, now with a generated key.
+
+```java
+SpaceConnectionOptions options = new SpaceConnectionOptions("http://localhost:3000", "your-api-key");
+options.setRetries(2);
+SpaceClient client = new SpaceClient(options);
+
+// job.getIdempotencyKey() = UUID.randomUUID().toString(), created and stored when the job was enqueued.
+FeatureEvaluationResult result = client.features.evaluate(job.getUserId(), "acme-exports",
+        Collections.singletonMap("acme-maxExports", 1), WriteOptions.withIdempotencyKey(job.getIdempotencyKey()));
+if (!result.getEval()) {
+    return; // over the limit: nothing was consumed
+}
+try {
+    runExport(job);
+} catch (RuntimeException e) {
+    // Give back exactly this consumption, whatever happened meanwhile.
+    client.features.revertConsumption(job.getUserId(), "acme-exports", result.getConsumptionId(),
+            WriteOptions.withIdempotencyKey(job.getIdempotencyKey() + ":revert"));
+    throw e;
+}
+```
+
+With `atomic-usage-limits`, SPACE applies a consumption only if every amount fits its limit, also
+under concurrency; one that does not fit answers `getEval() == false` and consumes nothing. A
+`consumptionId` stays revertible for SPACE's `CONSUMPTION_RETENTION_SECONDS` (24 h by default), and
+keys are remembered for `IDEMPOTENCY_KEY_TTL_SECONDS` (24 h by default). `revertConsumption` returns
+`false` when SPACE does not know the id (404) and throws `SpaceFeatureUnsupportedException` without
+sending anything on a SPACE without `atomic-usage-limits`.
 
 ### Caching
 
@@ -483,6 +542,7 @@ Main client class for interacting with the Space platform.
 
 **Methods:**
 - `isConnectedToSpace()`: Check if connected to Space API
+- `hasCapability(String token)`: Whether SPACE advertises an `X-Space-Capabilities` token (`idempotency-key`, `atomic-usage-limits`...), from a recent response or `GET /healthcheck`
 - `on(String event, Consumer<Object> callback)`: Register event listener
 - `removeListener(String event)`: Remove specific event listener
 - `removeAllListeners()`: Remove all event listeners
@@ -501,9 +561,11 @@ Manage user contracts.
 
 **Methods:**
 - `getContract(String userId)`: Retrieve user contract
-- `addContract(ContractToCreate contract)`: Create new contract
+- `addContract(ContractToCreate contract[, WriteOptions options])`: Create new contract (with `WriteOptions`: your `Idempotency-Key`, failures thrown)
+- `updateContractSubscriptionByGroupId(String groupId, Subscription subscription[, WriteOptions options])`: Novate every contract of a group
+- `updateContractUsageLevels(String userId, String serviceName, Map<String, Number> increments[, WriteOptions options])`: Usage level increments
 - `updateContractSubscription(String userId, Subscription subscription)`: Update subscription (unconditional; `null` on failure)
-- `novate(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`), `keepBillingPeriod` and `rejectPrivate`; throws on failure, and `SpaceFeatureUnsupportedException` when SPACE cannot honour an option
+- `novate(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`), `keepBillingPeriod`, `rejectPrivate` and `idempotencyKey`; throws on failure, and `SpaceFeatureUnsupportedException` when SPACE cannot honour an option
 - `previewNovation(String userId, Subscription subscription[, boolean keepBillingPeriod | NovationOptions options])`: Dry run (`NovationPreview`); `options` carries `keepBillingPeriod` and `rejectPrivate`
 - `getPricings(String userId)`: Pricing version, status, plan and add-ons of every service of the contract, plus its `contractVersion` (`ContractPricings`)
 
@@ -526,8 +588,9 @@ Evaluate features and manage pricing.
 - `evaluate(String userId, String featureId)`: Evaluate feature (read-only)
 - `evaluate(String userId, String featureId, Map<String, Number> consumption)`: Evaluate with consumption
 - `evaluate(String userId, String featureId, Map<String, Number> consumption, boolean details, boolean server)`: Full evaluation
-- `revertEvaluation(String userId, String featureId)`: Revert evaluation
-- `revertEvaluation(String userId, String featureId, boolean revertToLatest)`: Revert with options
+- `evaluate(String userId, String featureId, Map<String, Number> consumption, WriteOptions options)`: Consumption with your `Idempotency-Key`; failures thrown
+- `revertConsumption(String userId, String featureId, String consumptionId[, WriteOptions options])`: Revert exactly the consumption with that `getConsumptionId()` (`false` on 404)
+- `revertEvaluation(String userId, String featureId[, boolean revertToLatest])`: **Deprecated**, use `revertConsumption`
 - `generateUserPricingToken(String userId)`: Generate pricing token
 
 ## Events
@@ -546,7 +609,8 @@ Available WebSocket events:
 
 The methods of the subscription-change API (`pricings.getYaml`, `contracts.getPricings`,
 `contracts.previewNovation`, `contracts.novate`,
-`services.getNewContractsPricing`) throw unchecked exceptions instead
+`services.getNewContractsPricing`, `features.revertConsumption` and the overloads that take
+`WriteOptions`) throw unchecked exceptions instead
 of returning `null`:
 
 All of them extend `SpaceException` (unchecked), so one `catch` handles every failure:
@@ -564,6 +628,12 @@ All of them extend `SpaceException` (unchecked), so one `catch` handles every fa
   receives JSON from a SPACE that ignores `format=yaml`, or `contract-version` /
   `keep-billing-period` from `novate`); `isWritten()` says whether SPACE changed anything, and
   `getContract()` is what it stored when it did.
+- `IdempotencyException` (a `SpaceApiException`, with `getCode()` and `getIdempotencyKey()`) on the
+  keyed writes: `IdempotencyConflictException` (`409 IDEMPOTENCY_CONFLICT`, the key was used for a
+  different request), `IdempotencyInProgressException` (`409 IDEMPOTENCY_IN_PROGRESS` once the
+  retries are spent; `getRetryAfterSeconds()`; retry later with the same key) and
+  `IdempotencyKeyInvalidException` (`400 IDEMPOTENCY_KEY_INVALID`). `SpaceApiException.getHeader`
+  reads the response headers.
 - `SpaceException` itself: SPACE answered 2xx with a body the client cannot read.
 
 The older methods keep their existing behaviour (they log the failure and return `null`):
