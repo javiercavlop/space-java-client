@@ -46,6 +46,10 @@ class PricingReadsTest {
     @BeforeEach
     void setUp() throws IOException {
         server = new MockWebServer();
+        // Answer before the client exists: its constructor opens the socket.io handshake, and the
+        // default QueueDispatcher would block that request forever (and MockWebServer.shutdown()
+        // with it) if it arrived before a test called respond().
+        respond(new MockResponse().setResponseCode(500).setBody("{\"error\":\"no answer set\"}"));
         server.start();
         client = new SpaceClient(new SpaceConnectionOptions(server.url("/").toString(), "org-key"));
     }
