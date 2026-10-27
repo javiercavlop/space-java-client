@@ -15,6 +15,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
@@ -102,6 +105,75 @@ class PricingSocketReconnectTest {
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(archived).hasSize(1));
     }
 
+    @Test
+    @DisplayName("connect() right after disconnect() connects again and leaves one connection open")
+    void connectRightAfterDisconnect() {
+        AtomicInteger synchronizedCount = new AtomicInteger();
+        List<Object> created = new CopyOnWriteArrayList<>();
+        client = newClient();
+        client.on("synchronized", data -> synchronizedCount.incrementAndGet());
+        client.on("pricing_created", created::add);
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(synchronizedCount).hasValue(1));
+
+        client.disconnect();
+        client.connect();
+
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(synchronizedCount).hasValue(2));
+        server.emitPricing("PRICING_CREATED", "{\"serviceName\":\"Zoom\",\"pricingVersion\":\"v2\"}");
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(created).hasSize(1));
+        // The old connection is closed and no other one was left open.
+        await().during(Duration.ofMillis(500)).atMost(TIMEOUT).untilAsserted(() -> {
+            assertThat(server.openConnections()).isEqualTo(1);
+            assertThat(synchronizedCount).hasValue(2);
+            assertThat(created).hasSize(1);
+        });
+    }
+
+    @Test
+    @DisplayName("close() stops reconnecting to an unreachable SPACE")
+    void closeStopsReconnecting() throws IOException {
+        try (UnreachableSpace space = new UnreachableSpace()) {
+            client = new SpaceClient(new SpaceConnectionOptions(space.url(), "test-api-key"));
+            await().atMost(TIMEOUT).untilAsserted(() -> assertThat(space.attempts()).isGreaterThanOrEqualTo(1));
+
+            client.close();
+
+            expectNoFurtherAttempts(space);
+        }
+    }
+
+    @Test
+    @DisplayName("disconnect() stops reconnecting to an unreachable SPACE, and connect() tries again")
+    void disconnectStopsReconnecting() throws IOException {
+        try (UnreachableSpace space = new UnreachableSpace()) {
+            client = new SpaceClient(new SpaceConnectionOptions(space.url(), "test-api-key"));
+            await().atMost(TIMEOUT).untilAsserted(() -> assertThat(space.attempts()).isGreaterThanOrEqualTo(1));
+
+            client.disconnect();
+            expectNoFurtherAttempts(space);
+
+            int attempts = space.attempts();
+            client.connect();
+            await().atMost(TIMEOUT).untilAsserted(() -> assertThat(space.attempts()).isGreaterThan(attempts));
+        }
+    }
+
+    /**
+     * No connection attempt for 3 s, more than the first retry can take (socket.io-client retries
+     * after 1 s +/- 50 %).
+     */
+    private static void expectNoFurtherAttempts(UnreachableSpace space) {
+        // Let a close that is still being processed finish before counting.
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        int attempts = space.attempts();
+        await().during(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(space.attempts()).isEqualTo(attempts));
+    }
+
     /** disconnect(), wait until the server sees the connection close, then connect(). */
     private void reconnect() {
         int closedBefore = server.closedConnections();
@@ -121,6 +193,7 @@ class PricingSocketReconnectTest {
     private static final class FakePricingSocketServer implements AutoCloseable {
         private final MockWebServer server = new MockWebServer();
         private final AtomicInteger sessions = new AtomicInteger();
+        private final Set<WebSocket> opened = ConcurrentHashMap.newKeySet();
         private final Set<WebSocket> closed = ConcurrentHashMap.newKeySet();
         private volatile WebSocket pricings;
 
@@ -148,6 +221,10 @@ class PricingSocketReconnectTest {
             return closed.size();
         }
 
+        int openConnections() {
+            return opened.size() - closed.size();
+        }
+
         void emitPricing(String code, String detailsJson) {
             WebSocket socket = pricings;
             assertThat(socket).as("connected /pricings namespace").isNotNull();
@@ -162,6 +239,7 @@ class PricingSocketReconnectTest {
         private final class Session extends WebSocketListener {
             @Override
             public void onOpen(@NotNull WebSocket webSocket, @NotNull Response response) {
+                opened.add(webSocket);
                 webSocket.send("0{\"sid\":\"engine-" + sessions.incrementAndGet()
                         + "\",\"upgrades\":[],\"pingInterval\":25000,\"pingTimeout\":20000,\"maxPayload\":1000000}");
             }
@@ -191,6 +269,40 @@ class PricingSocketReconnectTest {
             public void onFailure(@NotNull WebSocket webSocket, @NotNull Throwable t, Response response) {
                 closed.add(webSocket);
             }
+        }
+    }
+
+    /** Accepts TCP connections and drops them at once, counting them: a SPACE that cannot be reached. */
+    private static final class UnreachableSpace implements AutoCloseable {
+        private final ServerSocket serverSocket;
+        private final AtomicInteger attempts = new AtomicInteger();
+
+        UnreachableSpace() throws IOException {
+            serverSocket = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
+            Thread acceptor = new Thread(() -> {
+                while (!serverSocket.isClosed()) {
+                    try (Socket socket = serverSocket.accept()) {
+                        attempts.incrementAndGet();
+                    } catch (IOException e) {
+                        // closed
+                    }
+                }
+            }, "unreachable-space");
+            acceptor.setDaemon(true);
+            acceptor.start();
+        }
+
+        String url() {
+            return "http://127.0.0.1:" + serverSocket.getLocalPort();
+        }
+
+        int attempts() {
+            return attempts.get();
+        }
+
+        @Override
+        public void close() throws IOException {
+            serverSocket.close();
         }
     }
 }
