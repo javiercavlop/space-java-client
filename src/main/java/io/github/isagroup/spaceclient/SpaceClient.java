@@ -8,7 +8,10 @@ import io.github.isagroup.spaceclient.modules.ContractModule;
 import io.github.isagroup.spaceclient.modules.FeatureModule;
 import io.github.isagroup.spaceclient.types.SpaceConnectionOptions;
 import io.socket.client.IO;
+import io.socket.client.Manager;
 import io.socket.client.Socket;
+import io.socket.emitter.Emitter;
+import io.socket.thread.EventThread;
 import okhttp3.*;
 import org.json.JSONObject;
 import org.slf4j.Logger;
@@ -99,6 +102,24 @@ public class SpaceClient {
         }
     }
 
+    // State of the socket.io manager, read and written on the socket.io event thread only.
+    /** Whether the manager's connection is open (between its {@code open} and {@code close} events). */
+    private boolean managerOpen;
+    /** Whether disconnect() started closing an open connection that has not closed yet. */
+    private boolean managerClosing;
+    /** Whether connect() was called while {@link #managerClosing}: connect once the close is done. */
+    private boolean connectWhenClosed;
+
+    private final Emitter.Listener onManagerOpen = args -> managerOpen = true;
+    private final Emitter.Listener onManagerClose = args -> {
+        managerOpen = false;
+        managerClosing = false;
+        if (connectWhenClosed) {
+            connectWhenClosed = false;
+            pricingSocketNamespace.connect();
+        }
+    };
+
     /**
      * Initialize WebSocket connection
      */
@@ -113,6 +134,8 @@ public class SpaceClient {
         this.socketClient = IO.socket(wsUrl, opts);
         // Don't auto-connect on initialization
         this.pricingSocketNamespace = socketClient.io().socket("/pricings");
+        socketClient.io().on(Manager.EVENT_OPEN, onManagerOpen);
+        socketClient.io().on(Manager.EVENT_CLOSE, onManagerClose);
         
         configureSocket();
         // Connect manually after setup
@@ -229,23 +252,45 @@ public class SpaceClient {
     }
 
     /**
-     * Establishes a connection to the pricing WebSocket namespace
+     * Establishes a connection to the pricing WebSocket namespace. If already connected or
+     * connecting, this method does nothing. Called right after {@link #disconnect()}, it connects
+     * once the previous connection has closed.
      */
     public void connect() {
-        if (pricingSocketNamespace != null && !pricingSocketNamespace.connected()) {
-            pricingSocketNamespace.connect();
+        if (pricingSocketNamespace == null) {
+            return;
         }
+        // On the event thread, after any disconnect() queued before it.
+        EventThread.exec(() -> {
+            if (managerClosing) {
+                // Opening now would race with the pending close of the previous connection.
+                connectWhenClosed = true;
+            } else {
+                pricingSocketNamespace.connect();
+            }
+        });
     }
 
     /**
      * Disconnects from the pricing WebSocket namespace. The socket handlers and the listeners
      * registered with {@link #on(String, Consumer)} are kept, so {@link #connect()} resumes
-     * delivering events to them.
+     * delivering events to them. A connection attempt in progress is stopped too: no further
+     * reconnection attempts are made.
      */
     public void disconnect() {
-        if (pricingSocketNamespace != null && pricingSocketNamespace.connected()) {
-            pricingSocketNamespace.disconnect();
+        if (pricingSocketNamespace == null) {
+            return;
         }
+        EventThread.exec(() -> {
+            connectWhenClosed = false;
+            // Not only when connected: while SPACE is unreachable the socket is retrying, and this
+            // stops it. With no namespace left active, socket.io closes the manager and cancels
+            // the pending reconnection.
+            pricingSocketNamespace.disconnect();
+            // An open connection may finish closing later (after its last write is flushed);
+            // the manager's close event then clears this.
+            managerClosing = managerOpen;
+        });
     }
 
     /**
@@ -256,6 +301,11 @@ public class SpaceClient {
         if (pricingSocketNamespace != null) {
             // The client is not reused after close(): drop the socket handlers.
             pricingSocketNamespace.off();
+            Manager manager = socketClient.io();
+            EventThread.exec(() -> {
+                manager.off(Manager.EVENT_OPEN, onManagerOpen);
+                manager.off(Manager.EVENT_CLOSE, onManagerClose);
+            });
         }
         
         if (cache != null) {
