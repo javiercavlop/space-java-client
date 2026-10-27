@@ -13,6 +13,8 @@ public enum SpaceEvent {
     CONTRACT_NOVATED("contract_novated"),
     CONTRACT_DELETED("contract_deleted"),
     CONTRACT_RENEWED("contract_renewed"),
+    /** A namespace connected or reconnected; the listener receives a {@link ResyncInfo}. */
+    RESYNC("resync"),
     ERROR("error");
 
     private final String eventName;

@@ -9,6 +9,8 @@ import io.github.isagroup.spaceclient.modules.FeatureModule;
 import io.github.isagroup.spaceclient.modules.PricingModule;
 import io.github.isagroup.spaceclient.modules.ServiceModule;
 import io.github.isagroup.spaceclient.types.ContractEventDetails;
+import io.github.isagroup.spaceclient.types.PricingEventDetails;
+import io.github.isagroup.spaceclient.types.ResyncInfo;
 import io.github.isagroup.spaceclient.types.SpaceConnectionOptions;
 import io.socket.client.IO;
 import io.socket.client.Socket;
@@ -46,7 +48,7 @@ public class SpaceClient {
 
     private final Set<String> validEvents = new HashSet<>(Arrays.asList(
             "synchronized", "pricing_created", "pricing_archived", 
-            "pricing_actived", "service_disabled", "error",
+            "pricing_actived", "service_disabled", "error", "resync",
             "contract_created", "contract_novated", "contract_deleted", "contract_renewed"
     ));
     
@@ -55,6 +57,12 @@ public class SpaceClient {
     
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
+
+    /** The {@code eventId}s seen recently, shared by both namespaces; {@code null} when off. */
+    private final EventIdWindow eventIds;
+
+    /** The namespaces that connected before, to tell a reconnection from the first connection. */
+    private final Set<String> connectedBefore = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
      * How long the capabilities a SPACE response advertises ({@code X-Space-Capabilities}) are
@@ -93,6 +101,9 @@ public class SpaceClient {
         this.apiKey = options.getApiKey();
         this.organizationId = options.getOrganizationId();
         this.timeout = options.getTimeout();
+        this.eventIds = options.isEventDeduplication()
+                ? new EventIdWindow(options.getEventDeduplicationMaxEntries(), options.getEventDeduplicationWindow())
+                : null;
 
         // Initialize ObjectMapper with JavaTimeModule for Date handling
         this.objectMapper = new ObjectMapper();
@@ -168,6 +179,7 @@ public class SpaceClient {
             if (callback != null) {
                 callback.accept(null);
             }
+            onNamespaceConnected(ResyncInfo.PRICINGS);
         });
 
         pricingSocketNamespace.on("message", args -> {
@@ -193,9 +205,42 @@ public class SpaceClient {
         if (CONTRACT_EVENTS.contains(code)) {
             return;
         }
+        if (!acceptEvent(data)) {
+            return;
+        }
         Consumer<Object> callback = callbackFunctions.get(code);
         if (callback != null) {
-            callback.accept(data.opt("details"));
+            PricingEventDetails details = PricingEventDetails.fromMessage(data);
+            callback.accept(details != null ? details : data.opt("details"));
+        }
+    }
+
+    /**
+     * Whether to deliver a message: {@code false} for a repeat of an {@code eventId} seen in the
+     * deduplication window. Messages without {@code eventId} (older SPACE) always pass.
+     */
+    private boolean acceptEvent(JSONObject data) {
+        Object eventId = data.opt("eventId");
+        if (eventIds == null || !(eventId instanceof String) || ((String) eventId).isEmpty()) {
+            return true;
+        }
+        return eventIds.accept((String) eventId);
+    }
+
+    /**
+     * Called when a namespace ({@code "pricings"} or {@code "contracts"}) connects: after a
+     * reconnection of {@code /contracts} the cached data of every user is invalidated (contract
+     * events sent meanwhile are lost), then the {@code resync} listener receives a
+     * {@link ResyncInfo}.
+     */
+    void onNamespaceConnected(String namespace) {
+        boolean reconnect = !connectedBefore.add(namespace);
+        if (reconnect && ResyncInfo.CONTRACTS.equals(namespace) && cache != null && cache.isEnabled()) {
+            cache.invalidateAllUsers();
+        }
+        Consumer<Object> callback = callbackFunctions.get("resync");
+        if (callback != null) {
+            callback.accept(new ResyncInfo(namespace, reconnect));
         }
     }
 
@@ -205,8 +250,11 @@ public class SpaceClient {
      * with a {@link ContractEventDetails}.
      */
     void dispatchContractMessage(JSONObject data) {
+        if (!acceptEvent(data)) {
+            return;
+        }
         String code = data.optString("code", "").toLowerCase();
-        ContractEventDetails details = ContractEventDetails.fromJson(data.optJSONObject("details"));
+        ContractEventDetails details = ContractEventDetails.fromMessage(data);
         if (details != null && details.getUserId() != null && cache != null && cache.isEnabled()) {
             cache.invalidateUser(details.getUserId());
         }
@@ -237,6 +285,7 @@ public class SpaceClient {
                 opts.auth.put("organizationId", organizationId);
             }
             contractSocketNamespace = socketClient.io().socket("/contracts", opts);
+            contractSocketNamespace.on(Socket.EVENT_CONNECT, args -> onNamespaceConnected(ResyncInfo.CONTRACTS));
             contractSocketNamespace.on("message", args -> {
                 if (args.length > 0 && args[0] instanceof JSONObject) {
                     dispatchContractMessage((JSONObject) args[0]);
@@ -310,7 +359,12 @@ public class SpaceClient {
      * {@code contract_deleted}, {@code contract_renewed}) are received on the authenticated
      * {@code /contracts} namespace, only for contracts of the API key's organisation; registering
      * the first one opens it. Their callback receives a {@link ContractEventDetails}, after the
-     * affected user's cache entries have been invalidated.
+     * affected user's cache entries have been invalidated. Pricing callbacks receive a
+     * {@link PricingEventDetails} (a {@link JSONObject}). Both carry {@code eventId} and
+     * {@code occurredAt}; a repeated {@code eventId} is not delivered again.
+     *
+     * {@code resync} fires each time a namespace connects, with a {@link ResyncInfo}. SPACE does
+     * not replay events, so after a reconnection re-read the contracts you hold.
      *
      * @param event The name of the event to listen for
      * @param callback The function to execute when the event is triggered

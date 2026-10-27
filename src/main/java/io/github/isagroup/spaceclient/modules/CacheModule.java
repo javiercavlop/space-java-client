@@ -227,6 +227,26 @@ public class CacheModule {
     /**
      * Close the cache provider
      */
+    /**
+     * Invalidate the cache entries of every user (contracts, evaluations, subscriptions, pricing
+     * tokens), e.g. after contract events may have been missed.
+     */
+    public void invalidateAllUsers() {
+        if (!isEnabled()) {
+            return;
+        }
+
+        try {
+            for (String pattern : new String[]{"contract:*", "feature:*", "subscription:*", "pricing-token:*"}) {
+                for (String key : keys(pattern)) {
+                    delete(key);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("[CacheModule] Error invalidating users cache", e);
+        }
+    }
+
     public void close() {
         if (provider != null) {
             try {

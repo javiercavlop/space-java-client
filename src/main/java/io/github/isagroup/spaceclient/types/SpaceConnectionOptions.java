@@ -1,6 +1,7 @@
 package io.github.isagroup.spaceclient.types;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import java.time.Duration;
 import java.util.Map;
 
 /**
@@ -22,6 +23,15 @@ public class SpaceConnectionOptions {
 
     @JsonProperty("organizationId")
     private String organizationId;
+
+    @JsonProperty("eventDeduplication")
+    private Boolean eventDeduplication;
+
+    @JsonProperty("eventDeduplicationMaxEntries")
+    private Integer eventDeduplicationMaxEntries;
+
+    @JsonProperty("eventDeduplicationWindowMs")
+    private Long eventDeduplicationWindowMs;
 
     public SpaceConnectionOptions() {
     }
@@ -89,5 +99,38 @@ public class SpaceConnectionOptions {
 
     public void setOrganizationId(String organizationId) {
         this.organizationId = organizationId;
+    }
+
+    /**
+     * Whether repeated SPACE events are dropped by {@code eventId} (a consumer can receive one
+     * event more than once). {@code true} by default; events without {@code eventId} (older
+     * SPACE) are always delivered.
+     */
+    public boolean isEventDeduplication() {
+        return eventDeduplication == null || eventDeduplication;
+    }
+
+    public void setEventDeduplication(Boolean eventDeduplication) {
+        this.eventDeduplication = eventDeduplication;
+    }
+
+    /** At most this many event ids are remembered, oldest dropped first (default 10,000). */
+    public int getEventDeduplicationMaxEntries() {
+        return eventDeduplicationMaxEntries != null ? eventDeduplicationMaxEntries : 10_000;
+    }
+
+    public void setEventDeduplicationMaxEntries(Integer eventDeduplicationMaxEntries) {
+        this.eventDeduplicationMaxEntries = eventDeduplicationMaxEntries;
+    }
+
+    /** How long an event id is remembered after it was first seen (default 10 minutes). */
+    public Duration getEventDeduplicationWindow() {
+        return eventDeduplicationWindowMs != null
+                ? Duration.ofMillis(eventDeduplicationWindowMs)
+                : Duration.ofMinutes(10);
+    }
+
+    public void setEventDeduplicationWindow(Duration window) {
+        this.eventDeduplicationWindowMs = window != null ? window.toMillis() : null;
     }
 }
