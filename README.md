@@ -302,6 +302,13 @@ client.on("error", error -> {
     System.err.println("WebSocket error: " + error);
 });
 
+// Contract events of the API key's organisation (authenticated /contracts namespace)
+client.on("contract_novated", data -> {
+    ContractEventDetails details = (ContractEventDetails) data;
+    System.out.println(details.getUserId() + " is now at " + details.getContractVersion()
+            + " for " + details.getServices());
+});
+
 // Connect to WebSocket
 client.connect();
 
@@ -427,6 +434,35 @@ its original file. `getPricings` is never served from cache.
 > JSON as if it were the file. Only `application/yaml`, `text/yaml` and their `x-` variants are
 > accepted.
 
+#### Contract events
+
+`contract_created`, `contract_novated`, `contract_deleted` and `contract_renewed` arrive on the
+authenticated `/contracts` namespace, and only for contracts of the API key's organisation. The
+client opens it, sending the key as socket.io `auth: {apiKey: ...}`, when the first contract
+listener is registered, and closes it when the last one is removed. The callback receives a
+`ContractEventDetails` (`userId`, `organizationId`, `contractVersion`, `services`), after the
+user's cache entries have been invalidated. A key SPACE refuses is reported to the `error`
+listener.
+
+### Pricing Tokens
+
+`features.generateUserPricingToken(userId)` returns a JWT signed by SPACE. To read it on the
+backend, for example to know the user's subscription and `contractVersion`, decode it:
+
+```java
+PricingTokenPayload payload = PricingTokenPayload.decode(client.features.generateUserPricingToken("user123"));
+PricingTokenSubscription subscription = payload.getSubscription(); // null for older SPACE versions
+if (subscription != null) {
+    subscription.getContractedServices();
+    subscription.getSubscriptionPlans();
+    subscription.getSubscriptionAddOns();
+    subscription.getContractVersion();
+}
+```
+
+`decode` does **not** verify the signature: use it to read a token you just received from SPACE,
+never to authenticate one a caller sent you.
+
 ### Cleanup
 
 Always close the client when done to release resources:
@@ -499,6 +535,8 @@ Available WebSocket events:
 - `pricing_archived`: Pricing archived
 - `pricing_actived`: Pricing activated
 - `service_disabled`: Service disabled
+- `contract_created`, `contract_novated`, `contract_deleted`, `contract_renewed`: A contract of the
+  API key's organisation changed (callback receives `ContractEventDetails`)
 - `error`: Connection error
 
 ## Error Handling
