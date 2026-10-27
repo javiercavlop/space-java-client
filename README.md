@@ -315,6 +315,36 @@ client.removeAllListeners();
 client.disconnect();
 ```
 
+### Pricing Pages
+
+A host backend (for example a Spring service holding the SPACE org key) renders a pricing page
+with the version a visitor would get, or with the version a signed-in customer is on:
+
+```java
+import io.github.isagroup.spaceclient.exceptions.PricingYamlUnavailableException;
+import io.github.isagroup.spaceclient.types.*;
+
+// Signed-out visitor: the version SPACE assigns to new contracts.
+NewContractsPricing current = client.services.getNewContractsPricing("acme");
+PricingYaml pricing = client.pricings.getYaml("acme", current.getVersion());
+// current.getSource(): "sphere-policy" | "default" | "latest-active"
+
+// Signed-in customer: the version of THEIR contract.
+ContractPricings mine = client.contracts.getPricings("user123");
+ContractServicePricing acme = mine.getServices().get("acme");
+acme.getVersion(); acme.isArchived(); acme.getPlan(); acme.getAddOns(); acme.getNewContractsVersion();
+PricingYaml theirs = client.pricings.getYaml("acme", acme.getVersion());
+
+// The file is returned byte for byte; keep its ETag to revalidate cheaply.
+PricingYaml again = client.pricings.getYaml("acme", acme.getVersion(), theirs.getEtag());
+if (again.isNotModified()) {
+    // reuse theirs.getYaml()
+}
+```
+
+`getYaml` throws `PricingYamlUnavailableException` when SPACE knows the version but no longer has
+its original file. `getPricings` is never served from cache.
+
 ### Cleanup
 
 Always close the client when done to release resources:
@@ -340,6 +370,8 @@ Main client class for interacting with the Space platform.
 - `close()`: Close all connections and cleanup
 - `contracts`: ContractModule instance (for managing contracts)
 - `features`: FeatureModule instance (for evaluating features)
+- `pricings`: PricingModule instance (for reading Pricing2Yaml files)
+- `services`: ServiceModule instance (for service-level information)
 - `cache`: CacheModule instance (for cache management)
 
 ### ContractModule
@@ -350,6 +382,18 @@ Manage user contracts.
 - `getContract(String userId)`: Retrieve user contract
 - `addContract(ContractToCreate contract)`: Create new contract
 - `updateContractSubscription(String userId, Subscription subscription)`: Update subscription
+- `getPricings(String userId)`: Pricing version, status, plan and add-ons of every service of the contract, plus its `contractVersion` (`ContractPricings`)
+
+### PricingModule
+
+**Methods:**
+- `getYaml(String serviceName, String pricingVersion)`: Raw Pricing2Yaml of a version (`PricingYaml`: YAML, ETag, syntax version)
+- `getYaml(String serviceName, String pricingVersion, String etag)`: Conditional variant (`isNotModified()` on 304)
+
+### ServiceModule
+
+**Methods:**
+- `getNewContractsPricing(String serviceName)`: The version SPACE assigns to new contracts (`NewContractsPricing`)
 
 ### FeatureModule
 
@@ -375,13 +419,21 @@ Available WebSocket events:
 
 ## Error Handling
 
-All API methods throw `IOException` for network/API errors:
+The methods of the subscription-change API (`pricings.getYaml`, `contracts.getPricings`,
+`services.getNewContractsPricing`, and the ones added with them) throw unchecked exceptions instead
+of returning `null`:
+
+- `SpaceApiException`: SPACE refused (non-2xx). Carries `getStatusCode()`, `getMethod()`,
+  `getPath()`, `getBody()` and `getErrorCode()` (the `error` field of a JSON body).
+- `PricingYamlUnavailableException` (a `SpaceApiException`): `404 PRICING_YAML_UNAVAILABLE`.
+- `java.io.UncheckedIOException`: SPACE could not be reached.
+
+The older methods keep their existing behaviour (they log the failure and return `null`):
 
 ```java
-try {
-    Contract contract = client.contracts.getContract("user123");
-} catch (IOException e) {
-    System.err.println("Failed to get contract: " + e.getMessage());
+Contract contract = client.contracts.getContract("user123");
+if (contract == null) {
+    System.err.println("Failed to get contract (see the logs)");
 }
 ```
 

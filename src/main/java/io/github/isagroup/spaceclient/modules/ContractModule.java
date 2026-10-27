@@ -3,6 +3,7 @@ package io.github.isagroup.spaceclient.modules;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.isagroup.spaceclient.SpaceClient;
 import io.github.isagroup.spaceclient.types.Contract;
+import io.github.isagroup.spaceclient.types.ContractPricings;
 import io.github.isagroup.spaceclient.types.ContractToCreate;
 import io.github.isagroup.spaceclient.types.Subscription;
 import okhttp3.*;
@@ -10,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +26,7 @@ public class ContractModule {
     private final SpaceClient spaceClient;
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final ApiCalls api;
 
     /**
      * Creates an instance of the ContractModule class
@@ -32,6 +35,33 @@ public class ContractModule {
         this.spaceClient = spaceClient;
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
+        this.api = new ApiCalls(spaceClient, httpClient);
+    }
+
+    /**
+     * Retrieves the pricing version of every service of a user's contract, together with the
+     * version SPACE assigns to new contracts and the current {@code contractVersion}
+     * ({@code GET /contracts/{userId}/pricings}). Use it to render the pricing page of a signed-in
+     * customer with the version of THEIR contract. Never cached: the {@code contractVersion} is
+     * only useful while it is current.
+     *
+     * Unlike the older methods of this module, a refusal is thrown, not logged and returned as
+     * {@code null}.
+     *
+     * @param userId The ID of the user whose contract pricings are to be retrieved
+     * @return The pricings of the contract
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceApiException 404 if the contract is
+     *         not in the caller's organisation, or any other refusal
+     * @throws UncheckedIOException if SPACE cannot be reached
+     */
+    public ContractPricings getPricings(String userId) {
+        ApiCalls.Answer answer = api.execute(
+                api.request(api.url("contracts", userId, "pricings").build()).get().build());
+        try {
+            return objectMapper.readValue(answer.body, ContractPricings.class);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Unexpected answer from SPACE: " + e.getMessage(), e);
+        }
     }
 
     /**
