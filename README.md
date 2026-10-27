@@ -491,6 +491,58 @@ String userId = PricingTokenPayload.decode(token).resolveUserId();
 When a token is checked on the server side, also compare `getOrganizationId()` (or `getAud()`) with
 your organization: the same userId can exist in another organization of the same SPACE.
 
+#### Verifying pricing tokens
+
+SPACE versions with the capability `pricing-token-jwks` sign pricing tokens with ES256 and publish
+the public keys at `GET {url}/api/v1/.well-known/jwks.json` (no API key). A token that comes back to
+your backend (from a browser, a queue, another service) can then be verified with public material
+only:
+
+```java
+PricingTokenPayload payload = client.features.verifyPricingToken(token, "my-org-id");
+String userId = payload.resolveUserId();
+```
+
+or, without a client:
+
+```java
+PricingTokenVerifier verifier = PricingTokenVerifier.builder("https://space.example.com")
+        .organizationId("my-org-id")
+        .issuer("space")                     // the JWT_ISSUER of your SPACE (default "space")
+        .leeway(Duration.ofSeconds(5))       // tolerance for exp (default 0)
+        .build();
+PricingTokenPayload payload = verifier.verify(token);
+```
+
+What is checked:
+
+- The signature is ES256 by a key of the JWKS, chosen by the token's `kid`. Any other `alg`
+  (`HS256`, `none`, ...) is rejected, and so is a token with a `jwk`, `jku`, `x5u` or `x5c` header:
+  keys only come from the JWKS URL of your SPACE.
+- `exp` is required and checked (with the leeway).
+- `iss` equals the configured issuer (`space` by default).
+- `aud` and `organizationId` equal the expected organization. It is required: pass it to the call
+  or the builder; `features.verifyPricingToken(token)` uses the `organizationId` of the client
+  options. A userId is only unique within an organization, so a valid signature alone does not tell
+  you the token is for one of your users.
+
+The JWKS is cached for the `max-age` of its response (SPACE sends 5 minutes; 5 minutes also without
+`Cache-Control`, nothing with `no-store`/`no-cache`) and fetched again when a token names a `kid` it
+does not know, at most once per refetch cooldown (default 30 s), so key rotations need nothing on
+your side. The verifier is thread-safe; keep one (or one client) and reuse it. Signatures are
+checked with [Nimbus JOSE + JWT](https://connect2id.com/products/nimbus-jose-jwt), a new dependency
+without transitive dependencies of its own.
+
+Exceptions, all `PricingTokenVerificationException` (a `SpaceException`) with `getCode()`:
+`PricingTokenSignatureException` (forged or tampered token), `PricingTokenExpiredException`
+(`getExpiredAt()`), `PricingTokenAudienceException` (another organization),
+`PricingTokenIssuerException`, `PricingTokenUnknownKeyException` (`getKid()` not published, e.g. a
+removed key), and the base class with `PRICING_TOKEN_INVALID` (malformed token, wrong `alg`,
+forbidden header, missing claims) or `PRICING_TOKEN_JWKS_UNAVAILABLE` (the JWKS could not be
+fetched). A SPACE that does not publish its keys (older versions, or one in the deprecated
+`PRICING_TOKEN_ALG=HS256` mode) throws `SpaceFeatureUnsupportedException` with
+`getCapability()` = `pricing-token-jwks`.
+
 ### Cleanup
 
 Always close the client when done to release resources:
@@ -554,6 +606,8 @@ Evaluate features and manage pricing.
 - `revertEvaluation(String userId, String featureId)`: Revert evaluation
 - `revertEvaluation(String userId, String featureId, boolean revertToLatest)`: Revert with options
 - `generateUserPricingToken(String userId)`: Generate pricing token
+- `verifyPricingToken(String token)` / `verifyPricingToken(String token, String organizationId)`:
+  Verify a pricing token with the JWKS of SPACE (see [Verifying pricing tokens](#verifying-pricing-tokens))
 
 ## Events
 

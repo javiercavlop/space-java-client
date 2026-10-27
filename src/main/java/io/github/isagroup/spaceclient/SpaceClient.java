@@ -449,6 +449,11 @@ public class SpaceClient {
         return apiKey;
     }
 
+    /** The organisation given in the options (member user keys), or {@code null}. */
+    public String getOrganizationId() {
+        return organizationId;
+    }
+
     public int getTimeout() {
         return timeout;
     }

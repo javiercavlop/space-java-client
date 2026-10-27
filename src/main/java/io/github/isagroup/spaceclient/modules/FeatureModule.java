@@ -2,7 +2,9 @@ package io.github.isagroup.spaceclient.modules;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.isagroup.spaceclient.SpaceClient;
+import io.github.isagroup.spaceclient.tokens.PricingTokenVerifier;
 import io.github.isagroup.spaceclient.types.FeatureEvaluationResult;
+import io.github.isagroup.spaceclient.types.PricingTokenPayload;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +23,7 @@ public class FeatureModule {
   private final SpaceClient spaceClient;
   private final OkHttpClient httpClient;
   private final ObjectMapper objectMapper;
+  private volatile PricingTokenVerifier verifier;
 
   /**
    * Creates an instance of the FeatureModule class
@@ -254,5 +257,48 @@ public class FeatureModule {
       logger.error("IO error during pricing token generation", e);
       return null;
     }
+  }
+  /**
+   * Verifies a pricing token with the public keys of this SPACE (JWKS, capability
+   * {@code pricing-token-jwks}) for the organisation of the client options, and returns its
+   * payload. See {@link #verifyPricingToken(String, String)}.
+   */
+  public PricingTokenPayload verifyPricingToken(String token) {
+    return verifyPricingToken(token, null);
+  }
+
+  /**
+   * Verifies a pricing token with the public keys of this SPACE (JWKS, capability
+   * {@code pricing-token-jwks}) and returns its payload: ES256 signature by a published key,
+   * {@code exp}, {@code iss} ({@code space}) and {@code aud}/{@code organizationId}. Use it for
+   * tokens that come back from a browser or another service; no API key is sent. The JWKS is cached
+   * by this client. For another issuer or a leeway, build a
+   * {@link PricingTokenVerifier} yourself.
+   *
+   * @param token          the pricing token
+   * @param organizationId the organisation the token must be issued for; {@code null} for the
+   *                       {@code organizationId} of the client options (one of the two is required)
+   * @return the verified payload
+   * @throws IllegalArgumentException without an organisation
+   * @throws io.github.isagroup.spaceclient.exceptions.PricingTokenVerificationException or a
+   *         subclass, when the token cannot be trusted
+   * @throws io.github.isagroup.spaceclient.exceptions.SpaceFeatureUnsupportedException when SPACE
+   *         does not publish its keys
+   */
+  public PricingTokenPayload verifyPricingToken(String token, String organizationId) {
+    PricingTokenVerifier current = verifier;
+    if (current == null) {
+      synchronized (this) {
+        current = verifier;
+        if (current == null) {
+          current = PricingTokenVerifier
+              .builderForJwksUrl(spaceClient.getHttpUrl() + "/.well-known/jwks.json")
+              .httpClient(httpClient)
+              .build();
+          verifier = current;
+        }
+      }
+    }
+    return current.verify(token, organizationId != null ? organizationId : spaceClient.getOrganizationId());
   }
 }
