@@ -20,6 +20,15 @@ public class FeatureEvaluationResult {
     @JsonProperty("error")
     private EvaluationError error;
 
+    /**
+     * Only when this evaluation applied an expected consumption, on a SPACE with
+     * {@code atomic-usage-limits}: the id to revert exactly that consumption with
+     * {@code features.revertConsumption}. The same id comes back when SPACE replays the request.
+     */
+    @JsonProperty("consumptionId")
+    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    private String consumptionId;
+
     public FeatureEvaluationResult() {
     }
 
@@ -53,6 +62,15 @@ public class FeatureEvaluationResult {
 
     public void setLimit(Map<String, Object> limit) {
         this.limit = limit;
+    }
+
+    /** The id of the consumption this evaluation applied, or {@code null}. */
+    public String getConsumptionId() {
+        return consumptionId;
+    }
+
+    public void setConsumptionId(String consumptionId) {
+        this.consumptionId = consumptionId;
     }
 
     public EvaluationError getError() {

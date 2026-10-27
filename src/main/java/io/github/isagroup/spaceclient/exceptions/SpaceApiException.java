@@ -3,6 +3,11 @@ package io.github.isagroup.spaceclient.exceptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
 /**
  * SPACE answered, and the answer was a refusal (a non-2xx status).
  *
@@ -21,17 +26,38 @@ public class SpaceApiException extends SpaceException {
     private final String method;
     private final String path;
     private final String body;
+    private final Map<String, String> headers;
 
     public SpaceApiException(int statusCode, String method, String path, String body) {
-        this(statusCode, method, path, body, null);
+        this(statusCode, method, path, body, (String) null);
+    }
+
+    /**
+     * A refusal together with its response headers (names compared ignoring case), e.g. to read
+     * {@code Retry-After}.
+     */
+    public SpaceApiException(int statusCode, String method, String path, String body, Map<String, String> headers) {
+        this(statusCode, method, path, body, null, headers);
     }
 
     protected SpaceApiException(int statusCode, String method, String path, String body, String message) {
+        this(statusCode, method, path, body, message, null);
+    }
+
+    protected SpaceApiException(int statusCode, String method, String path, String body, String message,
+                                Map<String, String> headers) {
         super(message != null ? message : describe(statusCode, method, path, body));
         this.statusCode = statusCode;
         this.method = method;
         this.path = path;
         this.body = body;
+        Map<String, String> lower = new HashMap<>();
+        if (headers != null) {
+            for (Map.Entry<String, String> header : headers.entrySet()) {
+                lower.put(header.getKey().toLowerCase(Locale.ROOT), header.getValue());
+            }
+        }
+        this.headers = Collections.unmodifiableMap(lower);
     }
 
     public int getStatusCode() {
@@ -44,6 +70,16 @@ public class SpaceApiException extends SpaceException {
 
     public String getPath() {
         return path;
+    }
+
+    /** A response header ({@code Retry-After}...), ignoring case, or {@code null}. */
+    public String getHeader(String name) {
+        return headers.get(name.toLowerCase(Locale.ROOT));
+    }
+
+    /** The response headers, names in lower case. */
+    public Map<String, String> getHeaders() {
+        return headers;
     }
 
     /** The raw response body, or {@code null}. */

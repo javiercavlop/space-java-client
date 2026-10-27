@@ -12,6 +12,7 @@ import io.github.isagroup.spaceclient.types.ContractToCreate;
 import io.github.isagroup.spaceclient.types.NovationOptions;
 import io.github.isagroup.spaceclient.types.NovationPreview;
 import io.github.isagroup.spaceclient.types.Subscription;
+import io.github.isagroup.spaceclient.types.WriteOptions;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -131,45 +132,49 @@ public class ContractModule {
      * Adds a new contract to the Space platform
      * This method also invalidates any cached data for the user
      *
+     * Sent with a new {@code Idempotency-Key} and retried with it per the client's {@code retries};
+     * failures are logged and {@code null} is returned, as before. Use
+     * {@link #addContract(ContractToCreate, WriteOptions)} to pass your own key or to get the
+     * failure.
+     *
      * @param contractToCreate The contract details to be created
-     * @return The created contract
+     * @return The created contract, or {@code null} on any failure
      */
     public Contract addContract(ContractToCreate contractToCreate) {
-      try{
-        String json = objectMapper.writeValueAsString(contractToCreate);
-
-        RequestBody body = RequestBody.create(json, JSON);
-
-        Request request = new Request.Builder()
-                .url(spaceClient.getHttpUrl() + "/contracts")
-                .header("x-api-key", spaceClient.getApiKey())
-                .post(body)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                logger.error("Error adding contract: {}", errorBody);
-                throw new IOException("Unexpected response code: " + response.code() + " - " + errorBody);
-            }
-
-            String responseBody = response.body().string();
-            Contract contract = objectMapper.readValue(responseBody, Contract.class);
-
-            CacheModule cache = spaceClient.cache;
-            // Invalidate cache for this user if caching is enabled
-            if (cache.isEnabled() && contract.getUserId() != null) {
-                cache.invalidateUser(contract.getUserId());
-                // Cache the new contract
-                cache.set(cache.getContractKey(contract.getUserId()), contract);
-            }
-
-            return contract;
+        try {
+            return addContract(contractToCreate, null);
+        } catch (SpaceException e) {
+            logger.error("Failed to add contract for userId: {}", contractToCreate.getUserContact().getUserId(), e);
+            return null;
         }
-      } catch (IOException e) {
-          logger.error("Failed to add contract for userId: {}", contractToCreate.getUserContact().getUserId(), e);
-          return null;
-      }
+    }
+
+    /**
+     * Adds a new contract ({@code POST /contracts}), a write SPACE applies at most once per
+     * {@code Idempotency-Key}: on a SPACE with {@code idempotency-key}, a retry of a creation that
+     * succeeded answers the created contract instead of {@code 409}. Failures are thrown.
+     *
+     * @param contractToCreate The contract details to be created
+     * @param options          the {@code Idempotency-Key} ({@code null} or no key: a new UUID)
+     * @return The created contract
+     * @throws io.github.isagroup.spaceclient.exceptions.IdempotencyException a refusal of the key
+     * @throws SpaceFeatureUnsupportedException a key of the caller's on a SPACE without {@code idempotency-key}
+     * @throws SpaceApiException any other refusal
+     */
+    public Contract addContract(ContractToCreate contractToCreate, WriteOptions options) {
+        Request.Builder request = api.request(api.url("contracts").build())
+                .post(RequestBody.create(toJson(contractToCreate), JSON));
+        ApiCalls.Answer answer = api.executeKeyed(request, keyOf(options));
+        Contract contract = fromJson(answer.body, Contract.class);
+
+        CacheModule cache = spaceClient.cache;
+        // Invalidate cache for this user if caching is enabled
+        if (cache.isEnabled() && contract.getUserId() != null) {
+            cache.invalidateUser(contract.getUserId());
+            // Cache the new contract
+            cache.set(cache.getContractKey(contract.getUserId()), contract);
+        }
+        return contract;
     }
 
     /**
@@ -182,43 +187,18 @@ public class ContractModule {
      *
      * @param userId The ID of the user whose subscription is to be updated
      * @param newSubscription The new subscription details to be applied
+     * Sent with a new {@code Idempotency-Key} and retried with it per the client's {@code retries}.
+     *
      * @return The updated contract, or {@code null} on any failure (refusal or SPACE unreachable)
      * @see #novate(String, Subscription, NovationOptions)
      */
     public Contract updateContractSubscription(String userId, Subscription newSubscription) {
-      try{
-        String json = objectMapper.writeValueAsString(newSubscription);
-        RequestBody body = RequestBody.create(json, JSON);
-
-        Request request = new Request.Builder()
-                .url(spaceClient.getHttpUrl() + "/contracts/" + userId)
-                .header("x-api-key", spaceClient.getApiKey())
-                .put(body)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                logger.error("Error updating contract subscription: {}", errorBody);
-                throw new IOException("Unexpected response code: " + response.code() + " - " + errorBody);
-            }
-
-            String responseBody = response.body().string();
-            Contract contract = objectMapper.readValue(responseBody, Contract.class);
-
-            CacheModule cache = spaceClient.cache;
-            // Invalidate and update cache for this user if caching is enabled
-            if (cache.isEnabled()) {
-                cache.invalidateUser(userId);
-                cache.set(cache.getContractKey(userId), contract);
-            }
-
-            return contract;
+        try {
+            return novate(userId, newSubscription, new NovationOptions());
+        } catch (SpaceException e) {
+            logger.error("Failed to update contract subscription for userId: {}", userId, e);
+            return null;
         }
-      } catch (IOException e) {
-          logger.error("Failed to update contract subscription for userId: {}", userId, e);
-          return null;
-      }
     }
     
     /**
@@ -242,7 +222,10 @@ public class ContractModule {
      * @param newSubscription The new subscription details to be applied
      * @param options         {@code expectedContractVersion} (sent as {@code If-Match}),
      *                        {@code keepBillingPeriod} (sent as {@code ?keepBillingPeriod=true})
-     *                        and {@code rejectPrivate} (sent as {@code ?rejectPrivate=true})
+     *                        and {@code rejectPrivate} (sent as {@code ?rejectPrivate=true});
+     *                        {@code idempotencyKey}: the {@code Idempotency-Key} of the novation
+     *                        (default: a new UUID). The PUT is retried with the same key and
+     *                        {@code If-Match} per the client's {@code retries}.
      * @return The updated contract, with {@code contractVersion} from the body or the {@code ETag}
      * @throws ContractChangedException          if the contract changed since {@code expectedContractVersion}
      * @throws SpaceFeatureUnsupportedException  if SPACE does not implement a requested option
@@ -269,7 +252,7 @@ public class ContractModule {
 
         ApiCalls.Answer answer;
         try {
-            answer = api.execute(request.build());
+            answer = api.executeKeyed(request, opts.getIdempotencyKey());
         } catch (SpaceApiException e) {
             if (e.getStatusCode() == 412) {
                 // Whatever we hold for this user is known to be stale.
@@ -497,82 +480,88 @@ public class ContractModule {
      * @return The updated contract
      */
     public List<Contract> updateContractSubscriptionByGroupId(String groupId, Subscription newSubscription) {
-      try{
-        String json = objectMapper.writeValueAsString(newSubscription);
-        RequestBody body = RequestBody.create(json, JSON);
-
-        Request request = new Request.Builder()
-                .url(spaceClient.getHttpUrl() + "/contracts?groupId=" + groupId)
-                .header("x-api-key", spaceClient.getApiKey())
-                .put(body)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                logger.error("Error updating contract subscription: {}", errorBody);
-                throw new IOException("Unexpected response code: " + response.code() + " - " + errorBody);
-            }
-
-            String responseBody = response.body().string();
-            List<Contract> contracts = objectMapper.readValue(responseBody, objectMapper.getTypeFactory().constructCollectionType(List.class, Contract.class));
-
-            CacheModule cache = spaceClient.cache;
-            // Invalidate and update cache for this user if caching is enabled
-            if (cache.isEnabled()) {
-              for (Contract contract : contracts) {
-                cache.invalidateUser(contract.getUserId());
-                cache.set(cache.getContractKey(contract.getUserId()), contract);
-              }
-            }
-
-            return contracts;
+        try {
+            return updateContractSubscriptionByGroupId(groupId, newSubscription, null);
+        } catch (SpaceException e) {
+            logger.error("Failed to update contract subscription for groupId: {}", groupId, e);
+            return null;
         }
-      } catch (IOException e) {
-          logger.error("Failed to update contract subscription for groupId: {}", groupId, e);
-          return null;
-      }
     }
 
+    /**
+     * Novates every contract of a group ({@code PUT /contracts?groupId=}), a write SPACE applies at
+     * most once per {@code Idempotency-Key}. Failures are thrown.
+     *
+     * @param groupId         The ID of the group whose contracts are to be updated
+     * @param newSubscription The new subscription details to be applied
+     * @param options         the {@code Idempotency-Key} ({@code null} or no key: a new UUID)
+     * @return The updated contracts
+     */
+    public List<Contract> updateContractSubscriptionByGroupId(String groupId, Subscription newSubscription,
+                                                              WriteOptions options) {
+        HttpUrl url = api.url("contracts").addQueryParameter("groupId", groupId).build();
+        ApiCalls.Answer answer = api.executeKeyed(
+                api.request(url).put(RequestBody.create(toJson(newSubscription), JSON)), keyOf(options));
+        List<Contract> contracts;
+        try {
+            contracts = objectMapper.readValue(answer.body,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, Contract.class));
+        } catch (IOException e) {
+            throw new SpaceException("Unexpected answer from SPACE: " + e.getMessage(), e);
+        }
 
+        CacheModule cache = spaceClient.cache;
+        // Invalidate and update cache for this user if caching is enabled
+        if (cache.isEnabled()) {
+            for (Contract contract : contracts) {
+                cache.invalidateUser(contract.getUserId());
+                cache.set(cache.getContractKey(contract.getUserId()), contract);
+            }
+        }
+        return contracts;
+    }
 
+    /**
+     * Applies usage level increments ({@code PUT /contracts/{userId}/usageLevels}); sent with a new
+     * {@code Idempotency-Key} and retried with it per the client's {@code retries}. Failures are
+     * logged and {@code null} is returned, as before.
+     */
     public Contract updateContractUsageLevels(String userId, String serviceName, Map<String, Number> usageLevelsNovations) {
-      try{
+        try {
+            return updateContractUsageLevels(userId, serviceName, usageLevelsNovations, null);
+        } catch (SpaceException e) {
+            logger.error("Failed to update contract usage levels for userId: {}", userId, e);
+            return null;
+        }
+    }
+
+    /**
+     * Applies usage level increments ({@code PUT /contracts/{userId}/usageLevels}), a write SPACE
+     * applies at most once per {@code Idempotency-Key}. Failures are thrown.
+     *
+     * @param options the {@code Idempotency-Key} ({@code null} or no key: a new UUID)
+     * @return The updated contract
+     */
+    public Contract updateContractUsageLevels(String userId, String serviceName,
+                                              Map<String, Number> usageLevelsNovations, WriteOptions options) {
         Map<String, Object> payload = new HashMap<>();
         payload.put(serviceName, usageLevelsNovations);
-        
-        String json = objectMapper.writeValueAsString(payload);
-        RequestBody body = RequestBody.create(json, JSON);
+        HttpUrl url = api.url("contracts", userId, "usageLevels").build();
+        ApiCalls.Answer answer = api.executeKeyed(
+                api.request(url).put(RequestBody.create(toJson(payload), JSON)), keyOf(options));
+        Contract contract = fromJson(answer.body, Contract.class);
 
-        Request request = new Request.Builder()
-                .url(spaceClient.getHttpUrl() + "/contracts/" + userId + "/usageLevels")
-                .header("x-api-key", spaceClient.getApiKey())
-                .put(body)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
-                logger.error("Error updating contract usage levels: {}", errorBody);
-                throw new IOException("Unexpected response code: " + response.code() + " - " + errorBody);
-            }
-
-            String responseBody = response.body().string();
-            Contract contract = objectMapper.readValue(responseBody, Contract.class);
-
-            CacheModule cache = spaceClient.cache;
-            // Invalidate and update cache for this user if caching is enabled
-            if (cache.isEnabled()) {
-                cache.invalidateUser(userId);
-                cache.set(cache.getContractKey(userId), contract);
-            }
-
-            return contract;
+        CacheModule cache = spaceClient.cache;
+        // Invalidate and update cache for this user if caching is enabled
+        if (cache.isEnabled()) {
+            cache.invalidateUser(userId);
+            cache.set(cache.getContractKey(userId), contract);
         }
-      } catch (IOException e) {
-          logger.error("Failed to update contract usage levels for userId: {}", userId, e);
-          return null;
-      }
+        return contract;
+    }
+
+    private static String keyOf(WriteOptions options) {
+        return options != null ? options.getIdempotencyKey() : null;
     }
 
     public void removeContract(String userId) {

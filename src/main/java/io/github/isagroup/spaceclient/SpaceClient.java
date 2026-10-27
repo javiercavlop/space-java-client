@@ -22,6 +22,7 @@ import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -66,6 +67,21 @@ public class SpaceClient {
     private volatile Set<String> capabilities;
     private volatile long capabilitiesSeenAt;
     private volatile LongSupplier clock = System::currentTimeMillis;
+
+    /** Upper bound of {@link SpaceConnectionOptions#getRetries()}. */
+    public static final int MAX_RETRIES = 10;
+
+    private final int retries;
+    private final long retryBaseDelayMs;
+    private final long retryMaxDelayMs;
+
+    /** Waits between retries; replaced in tests. */
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    private volatile Sleeper sleeper = Thread::sleep;
+    private volatile DoubleSupplier random = Math::random;
     
     public final CacheModule cache;
     public final ContractModule contracts;
@@ -93,6 +109,15 @@ public class SpaceClient {
         this.apiKey = options.getApiKey();
         this.organizationId = options.getOrganizationId();
         this.timeout = options.getTimeout();
+        this.retries = options.getRetries();
+        this.retryBaseDelayMs = options.getRetryBaseDelayMs();
+        this.retryMaxDelayMs = options.getRetryMaxDelayMs();
+        if (retries < 0 || retries > MAX_RETRIES) {
+            throw new IllegalArgumentException("retries must be from 0 to " + MAX_RETRIES);
+        }
+        if (retryBaseDelayMs < 0 || retryMaxDelayMs < 0) {
+            throw new IllegalArgumentException("retryBaseDelayMs and retryMaxDelayMs must not be negative");
+        }
 
         // Initialize ObjectMapper with JavaTimeModule for Date handling
         this.objectMapper = new ObjectMapper();
@@ -428,6 +453,76 @@ public class SpaceClient {
             return null;
         }
         return known;
+    }
+
+    /**
+     * Whether the connected SPACE advertises a capability token in {@code X-Space-Capabilities}
+     * (e.g. {@code idempotency-key}, {@code atomic-usage-limits}). Uses the capabilities seen on a
+     * response less than {@link #CAPABILITIES_TTL_MS} ago; when there are none, reads them from
+     * {@code GET /healthcheck} (unauthenticated). {@code false} when they cannot be read.
+     *
+     * @param capability the token to look for
+     */
+    public boolean hasCapability(String capability) {
+        Set<String> known = getCachedCapabilities();
+        if (known == null) {
+            Request request = new Request.Builder().url(httpUrl + "/healthcheck").get().build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                observeCapabilities(response.header("X-Space-Capabilities"), response.isSuccessful());
+            } catch (IOException e) {
+                logger.debug("Could not read the SPACE capabilities: {}", e.getMessage());
+            }
+            known = getCachedCapabilities();
+        }
+        return known != null && known.contains(capability.toLowerCase(Locale.ROOT));
+    }
+
+    /** Retries of writes that carry an {@code Idempotency-Key} (see {@link SpaceConnectionOptions#getRetries()}). */
+    public int getRetries() {
+        return retries;
+    }
+
+    /**
+     * How long to wait before retry number {@code attempt + 1}, in milliseconds, or {@code -1} to
+     * stop: {@code Retry-After} when SPACE sent one (stop if it is longer than
+     * {@code retryMaxDelayMs}), otherwise an exponential backoff with jitter capped at
+     * {@code retryMaxDelayMs}. Used by the modules.
+     *
+     * @param attempt           0 for the first retry
+     * @param retryAfterSeconds the parsed {@code Retry-After}, or {@code null}
+     */
+    public long retryDelayMillis(int attempt, Integer retryAfterSeconds) {
+        if (retryAfterSeconds != null) {
+            long millis = retryAfterSeconds * 1000L;
+            return millis <= retryMaxDelayMs ? millis : -1;
+        }
+        double ceiling = Math.min((double) retryMaxDelayMs, retryBaseDelayMs * Math.pow(2, attempt));
+        return Math.round(ceiling * (0.5 + random.getAsDouble() / 2));
+    }
+
+    /**
+     * Waits before a retry. Used by the modules.
+     *
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceException if the thread is
+     *         interrupted (its interrupt flag is restored)
+     */
+    public void sleepBeforeRetry(long millis) {
+        try {
+            sleeper.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new io.github.isagroup.spaceclient.exceptions.SpaceException("Interrupted while waiting to retry", e);
+        }
+    }
+
+    /** Replaces the wait between retries (tests only). */
+    void setSleeperForTesting(Sleeper sleeper) {
+        this.sleeper = sleeper;
+    }
+
+    /** Replaces the jitter source of the retry backoff (tests only). */
+    void setRandomForTesting(DoubleSupplier random) {
+        this.random = random;
     }
 
     /** Forgets the cached capabilities, e.g. right after upgrading SPACE. */

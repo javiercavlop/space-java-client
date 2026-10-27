@@ -23,6 +23,15 @@ public class SpaceConnectionOptions {
     @JsonProperty("organizationId")
     private String organizationId;
 
+    @JsonProperty("retries")
+    private Integer retries;
+
+    @JsonProperty("retryBaseDelayMs")
+    private Long retryBaseDelayMs;
+
+    @JsonProperty("retryMaxDelayMs")
+    private Long retryMaxDelayMs;
+
     public SpaceConnectionOptions() {
     }
 
@@ -89,5 +98,45 @@ public class SpaceConnectionOptions {
 
     public void setOrganizationId(String organizationId) {
         this.organizationId = organizationId;
+    }
+
+    /**
+     * How many times a write carrying an {@code Idempotency-Key} (consumptions, reverts, contract
+     * creation, novations, usage level changes) is retried, with the same key, after a network
+     * error, a {@code 5xx} or a {@code 409 IDEMPOTENCY_IN_PROGRESS}. 0 to 10; default 0 (no
+     * retries). Retries only happen while SPACE advertises {@code idempotency-key}: an older SPACE
+     * would apply each attempt. Other requests are never retried.
+     */
+    public int getRetries() {
+        return retries != null ? retries : 0;
+    }
+
+    public void setRetries(Integer retries) {
+        this.retries = retries;
+    }
+
+    /**
+     * Base of the exponential backoff between retries (default 250 ms): the n-th retry waits
+     * between half and all of {@code retryBaseDelayMs * 2^(n-1)}, capped at
+     * {@link #getRetryMaxDelayMs()}. A {@code Retry-After} from SPACE is waited exactly instead.
+     */
+    public long getRetryBaseDelayMs() {
+        return retryBaseDelayMs != null ? retryBaseDelayMs : 250L;
+    }
+
+    public void setRetryBaseDelayMs(Long retryBaseDelayMs) {
+        this.retryBaseDelayMs = retryBaseDelayMs;
+    }
+
+    /**
+     * Longest wait before a retry (default 10000 ms). A longer {@code Retry-After} ends the
+     * retries: the client never waits less than SPACE asks.
+     */
+    public long getRetryMaxDelayMs() {
+        return retryMaxDelayMs != null ? retryMaxDelayMs : 10_000L;
+    }
+
+    public void setRetryMaxDelayMs(Long retryMaxDelayMs) {
+        this.retryMaxDelayMs = retryMaxDelayMs;
     }
 }

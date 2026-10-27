@@ -13,6 +13,7 @@ public class NovationOptions {
     private String expectedContractVersion;
     private boolean keepBillingPeriod;
     private boolean rejectPrivate;
+    private String idempotencyKey;
 
     public NovationOptions() {
     }
@@ -62,6 +63,23 @@ public class NovationOptions {
     public NovationOptions rejectPrivate(boolean rejectPrivate) {
         this.rejectPrivate = rejectPrivate;
         return this;
+    }
+
+    /**
+     * The {@code Idempotency-Key} of the novation (see {@link WriteOptions#idempotencyKey(String)}).
+     * Default: a new UUID per call, reused on the client's retries together with {@code If-Match}.
+     * Ignored by the preview.
+     *
+     * @throws IllegalArgumentException unless the key has 1 to 255 characters
+     */
+    public NovationOptions idempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = WriteOptions.checkKey(idempotencyKey);
+        return this;
+    }
+
+    /** The caller's key, or {@code null} for a generated one. */
+    public String getIdempotencyKey() {
+        return idempotencyKey;
     }
 
     public boolean isRejectPrivate() {
