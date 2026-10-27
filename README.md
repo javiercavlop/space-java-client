@@ -336,7 +336,7 @@ Main client class for interacting with the Space platform.
 - `removeListener(String event)`: Remove specific event listener
 - `removeAllListeners()`: Remove all event listeners
 - `connect()`: Connect to WebSocket
-- `disconnect()`: Disconnect from WebSocket
+- `disconnect()`: Disconnect from WebSocket (listeners are kept; `connect()` reconnects)
 - `close()`: Close all connections and cleanup
 - `contracts`: ContractModule instance (for managing contracts)
 - `features`: FeatureModule instance (for evaluating features)

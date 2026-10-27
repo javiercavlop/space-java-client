@@ -238,12 +238,13 @@ public class SpaceClient {
     }
 
     /**
-     * Disconnects from the pricing WebSocket namespace
+     * Disconnects from the pricing WebSocket namespace. The socket handlers and the listeners
+     * registered with {@link #on(String, Consumer)} are kept, so {@link #connect()} resumes
+     * delivering events to them.
      */
     public void disconnect() {
         if (pricingSocketNamespace != null && pricingSocketNamespace.connected()) {
             pricingSocketNamespace.disconnect();
-            pricingSocketNamespace.off();
         }
     }
 
@@ -252,6 +253,10 @@ public class SpaceClient {
      */
     public void close() {
         disconnect();
+        if (pricingSocketNamespace != null) {
+            // The client is not reused after close(): drop the socket handlers.
+            pricingSocketNamespace.off();
+        }
         
         if (cache != null) {
             cache.close();
