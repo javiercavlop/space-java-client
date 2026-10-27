@@ -345,6 +345,13 @@ if (again.isNotModified()) {
 `getYaml` throws `PricingYamlUnavailableException` when SPACE knows the version but no longer has
 its original file. `getPricings` is never served from cache.
 
+> **Older SPACE versions.** These calls need a SPACE with the subscription-change API. Without it,
+> `getPricings` and `getNewContractsPricing` throw `SpaceApiException` with SPACE's 404. An older
+> SPACE ignores `?format=yaml` and answers with the JSON pricing; `getYaml` then throws
+> `SpaceFeatureUnsupportedException` (`getCapability()` is `pricing-yaml`) instead of returning
+> JSON as if it were the file. Only `application/yaml`, `text/yaml` and their `x-` variants are
+> accepted.
+
 ### Cleanup
 
 Always close the client when done to release resources:
@@ -423,10 +430,17 @@ The methods of the subscription-change API (`pricings.getYaml`, `contracts.getPr
 `services.getNewContractsPricing`, and the ones added with them) throw unchecked exceptions instead
 of returning `null`:
 
+All of them extend `SpaceException` (unchecked), so one `catch` handles every failure:
+
 - `SpaceApiException`: SPACE refused (non-2xx). Carries `getStatusCode()`, `getMethod()`,
   `getPath()`, `getBody()` and `getErrorCode()` (the `error` field of a JSON body).
 - `PricingYamlUnavailableException` (a `SpaceApiException`): `404 PRICING_YAML_UNAVAILABLE`.
-- `java.io.UncheckedIOException`: SPACE could not be reached.
+- `SpaceConnectionException`: SPACE could not be reached (the `IOException` is the cause).
+- `SpaceFeatureUnsupportedException`: the connected SPACE lacks a feature the call depends on.
+  `getCapability()` is its `X-Space-Capabilities` token (e.g. `pricing-yaml` when `getYaml`
+  receives JSON from a SPACE that ignores `format=yaml`); `isWritten()` says whether SPACE changed
+  anything.
+- `SpaceException` itself: SPACE answered 2xx with a body the client cannot read.
 
 The older methods keep their existing behaviour (they log the failure and return `null`):
 

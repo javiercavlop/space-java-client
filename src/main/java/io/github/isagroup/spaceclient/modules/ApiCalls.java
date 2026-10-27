@@ -2,6 +2,7 @@ package io.github.isagroup.spaceclient.modules;
 
 import io.github.isagroup.spaceclient.SpaceClient;
 import io.github.isagroup.spaceclient.exceptions.SpaceApiException;
+import io.github.isagroup.spaceclient.exceptions.SpaceConnectionException;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
@@ -10,7 +11,6 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -44,7 +44,10 @@ final class ApiCalls {
         return new Request.Builder().url(url).header("x-api-key", spaceClient.getApiKey());
     }
 
-    /** Executes the request; non-2xx statuses outside {@code accept} raise {@link SpaceApiException}. */
+    /**
+     * Executes the request; non-2xx statuses outside {@code accept} raise {@link SpaceApiException},
+     * and a request that never got an answer raises {@link SpaceConnectionException}.
+     */
     Answer execute(Request request, Set<Integer> accept) {
         try (Response response = httpClient.newCall(request).execute()) {
             ResponseBody responseBody = response.body();
@@ -55,7 +58,7 @@ final class ApiCalls {
             }
             return new Answer(code, response.headers(), body);
         } catch (IOException e) {
-            throw new UncheckedIOException("Could not reach SPACE at " + request.url() + ": " + e.getMessage(), e);
+            throw new SpaceConnectionException("Could not reach SPACE at " + request.url() + ": " + e.getMessage(), e);
         }
     }
 

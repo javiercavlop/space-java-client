@@ -3,17 +3,28 @@ package io.github.isagroup.spaceclient.modules;
 import io.github.isagroup.spaceclient.SpaceClient;
 import io.github.isagroup.spaceclient.exceptions.PricingYamlUnavailableException;
 import io.github.isagroup.spaceclient.exceptions.SpaceApiException;
+import io.github.isagroup.spaceclient.exceptions.SpaceFeatureUnsupportedException;
 import io.github.isagroup.spaceclient.types.PricingYaml;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Module for reading pricing files from the Space platform
  */
 public class PricingModule {
+
+    /** The {@code X-Space-Capabilities} token of the raw YAML read (S2). */
+    public static final String PRICING_YAML = "pricing-yaml";
+
+    private static final Set<String> YAML_MEDIA_TYPES = new HashSet<>(Arrays.asList(
+            "application/yaml", "text/yaml", "application/x-yaml", "text/x-yaml"));
 
     private final ApiCalls api;
 
@@ -32,8 +43,11 @@ public class PricingModule {
      * @param pricingVersion The pricing version (e.g. {@code 2024-06-08})
      * @return The file, its ETag and its syntax version
      * @throws PricingYamlUnavailableException if SPACE cannot provide the original file
+     * @throws SpaceFeatureUnsupportedException if SPACE answers with something that is not YAML (a SPACE
+     *         without S2 ignores {@code format=yaml} and returns the JSON pricing); capability
+     *         {@code pricing-yaml}
      * @throws SpaceApiException               for any other refusal (e.g. 404 unknown version)
-     * @throws java.io.UncheckedIOException    if SPACE cannot be reached
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceConnectionException if SPACE cannot be reached
      */
     public PricingYaml getYaml(String serviceName, String pricingVersion) {
         return getYaml(serviceName, pricingVersion, null);
@@ -69,6 +83,24 @@ public class PricingModule {
             String known = receivedEtag != null ? receivedEtag : ApiCalls.quoteEtag(etag);
             return new PricingYaml(null, known, syntaxVersion, true);
         }
+        String mediaType = mediaType(answer.headers.get("Content-Type"));
+        if (!YAML_MEDIA_TYPES.contains(mediaType)) {
+            // SPACE without S2 ignores ?format=yaml and answers with the JSON pricing: that is not
+            // the file, so do not hand it out as one.
+            throw new SpaceFeatureUnsupportedException(PRICING_YAML,
+                    "SPACE answered " + (mediaType.isEmpty() ? "without a Content-Type" : mediaType) + " for "
+                            + serviceName + "@" + pricingVersion
+                            + ": this SPACE version does not support format=yaml");
+        }
         return new PricingYaml(answer.body, receivedEtag, syntaxVersion, false);
+    }
+
+    private static String mediaType(String contentType) {
+        if (contentType == null) {
+            return "";
+        }
+        int semicolon = contentType.indexOf(';');
+        String type = semicolon >= 0 ? contentType.substring(0, semicolon) : contentType;
+        return type.trim().toLowerCase(Locale.ROOT);
     }
 }

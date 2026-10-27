@@ -3,6 +3,9 @@ package io.github.isagroup.spaceclient.modules;
 import io.github.isagroup.spaceclient.SpaceClient;
 import io.github.isagroup.spaceclient.exceptions.PricingYamlUnavailableException;
 import io.github.isagroup.spaceclient.exceptions.SpaceApiException;
+import io.github.isagroup.spaceclient.exceptions.SpaceConnectionException;
+import io.github.isagroup.spaceclient.exceptions.SpaceException;
+import io.github.isagroup.spaceclient.exceptions.SpaceFeatureUnsupportedException;
 import io.github.isagroup.spaceclient.types.ContractPricings;
 import io.github.isagroup.spaceclient.types.ContractServicePricing;
 import io.github.isagroup.spaceclient.types.NewContractsPricing;
@@ -15,6 +18,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.util.Map;
@@ -117,7 +122,7 @@ class PricingReadsTest {
     @Test
     @DisplayName("getYaml escapes path segments")
     void getYamlEscapesSegments() throws Exception {
-        respond(new MockResponse().setResponseCode(200).setBody("x: 1\n"));
+        respond(new MockResponse().setResponseCode(200).setHeader("Content-Type", "text/yaml").setBody("x: 1\n"));
 
         PricingYaml result = client.pricings.getYaml("my svc", "v1/2");
 
@@ -125,6 +130,42 @@ class PricingReadsTest {
         assertThat(result.getYaml()).isEqualTo("x: 1\n");
         assertThat(result.getEtag()).isNull();
         assertThat(result.getSyntaxVersion()).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"application/yaml", "text/yaml; charset=utf-8", "application/x-yaml"})
+    @DisplayName("getYaml accepts the YAML media types")
+    void getYamlAcceptsYamlTypes(String contentType) {
+        respond(new MockResponse().setResponseCode(200).setHeader("Content-Type", contentType).setBody(YAML));
+
+        assertThat(client.pricings.getYaml("acme", "1.0").getYaml()).isEqualTo(YAML);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"application/json; charset=utf-8", ""})
+    @DisplayName("An old SPACE that ignores format=yaml and answers JSON raises SpaceFeatureUnsupportedException")
+    void getYamlFromOldSpace(String contentType) {
+        // A SPACE without S2 answers 200 with the JSON pricing; it must not be handed out as YAML.
+        MockResponse response = new MockResponse().setResponseCode(200).setBody("{\"saasName\":\"Acme\"}");
+        if (contentType.isEmpty()) {
+            response.removeHeader("Content-Type");
+        } else {
+            response.setHeader("Content-Type", contentType);
+        }
+        respond(response);
+
+        assertThatThrownBy(() -> client.pricings.getYaml("acme", "1.0"))
+                .isInstanceOf(SpaceFeatureUnsupportedException.class)
+                .isInstanceOf(SpaceException.class)
+                .isNotInstanceOf(SpaceApiException.class)
+                .hasMessageContaining("format=yaml")
+                .satisfies(error -> {
+                    SpaceFeatureUnsupportedException e = (SpaceFeatureUnsupportedException) error;
+                    assertThat(e.getCapability()).isEqualTo("pricing-yaml");
+                    assertThat(e.getCode()).isEqualTo("SPACE_FEATURE_UNSUPPORTED");
+                    assertThat(e.isWritten()).isFalse();
+                    assertThat(e.getContract()).isNull();
+                });
     }
 
     @Test
@@ -219,11 +260,25 @@ class PricingReadsTest {
     }
 
     @Test
-    @DisplayName("An unreachable SPACE is reported as an UncheckedIOException")
+    @DisplayName("An unreachable SPACE is reported as a SpaceConnectionException")
     void unreachable() throws IOException {
         server.shutdown();
 
         assertThatThrownBy(() -> client.services.getNewContractsPricing("acme"))
-                .isInstanceOf(java.io.UncheckedIOException.class);
+                .isInstanceOf(SpaceConnectionException.class)
+                .isInstanceOf(SpaceException.class)
+                .isNotInstanceOf(SpaceApiException.class)
+                .hasMessageContaining("Could not reach SPACE")
+                .hasCauseInstanceOf(IOException.class);
+    }
+
+    @Test
+    @DisplayName("An answer that is not the expected JSON is a SpaceException, not a parse error")
+    void unparsableAnswer() {
+        respond(new MockResponse().setResponseCode(200).setBody("<html>proxy</html>"));
+
+        assertThatThrownBy(() -> client.services.getNewContractsPricing("acme"))
+                .isExactlyInstanceOf(SpaceException.class)
+                .hasMessageContaining("Unexpected answer from SPACE");
     }
 }

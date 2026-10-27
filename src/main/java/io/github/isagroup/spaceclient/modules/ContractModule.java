@@ -2,6 +2,7 @@ package io.github.isagroup.spaceclient.modules;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.isagroup.spaceclient.SpaceClient;
+import io.github.isagroup.spaceclient.exceptions.SpaceException;
 import io.github.isagroup.spaceclient.types.Contract;
 import io.github.isagroup.spaceclient.types.ContractPricings;
 import io.github.isagroup.spaceclient.types.ContractToCreate;
@@ -11,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,7 +52,7 @@ public class ContractModule {
      * @return The pricings of the contract
      * @throws io.github.isagroup.spaceclient.exceptions.SpaceApiException 404 if the contract is
      *         not in the caller's organisation, or any other refusal
-     * @throws UncheckedIOException if SPACE cannot be reached
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceConnectionException if SPACE cannot be reached
      */
     public ContractPricings getPricings(String userId) {
         ApiCalls.Answer answer = api.execute(
@@ -60,7 +60,7 @@ public class ContractModule {
         try {
             return objectMapper.readValue(answer.body, ContractPricings.class);
         } catch (IOException e) {
-            throw new UncheckedIOException("Unexpected answer from SPACE: " + e.getMessage(), e);
+            throw new SpaceException("Unexpected answer from SPACE: " + e.getMessage(), e);
         }
     }
 

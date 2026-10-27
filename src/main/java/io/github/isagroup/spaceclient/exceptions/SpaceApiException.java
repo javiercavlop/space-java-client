@@ -12,9 +12,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * The older calls keep their behaviour of logging and returning {@code null}.
  *
  * Carries the status, the method and path, and the body, because the body is where SPACE
- * explains itself ({@code {"error": "..."}}).
+ * explains itself ({@code {"error": "..."}}). A {@link SpaceException}.
  */
-public class SpaceApiException extends RuntimeException {
+public class SpaceApiException extends SpaceException {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final int statusCode;

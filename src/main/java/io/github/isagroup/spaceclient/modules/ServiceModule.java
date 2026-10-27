@@ -2,11 +2,11 @@ package io.github.isagroup.spaceclient.modules;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.isagroup.spaceclient.SpaceClient;
+import io.github.isagroup.spaceclient.exceptions.SpaceException;
 import io.github.isagroup.spaceclient.types.NewContractsPricing;
 import okhttp3.OkHttpClient;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 
 /**
  * Module for service-level information of the Space platform
@@ -32,7 +32,7 @@ public class ServiceModule {
      * @param serviceName The name of the service
      * @return The version, the path of its YAML and how it was chosen
      * @throws io.github.isagroup.spaceclient.exceptions.SpaceApiException if SPACE refuses
-     * @throws UncheckedIOException if SPACE cannot be reached
+     * @throws io.github.isagroup.spaceclient.exceptions.SpaceConnectionException if SPACE cannot be reached
      */
     public NewContractsPricing getNewContractsPricing(String serviceName) {
         ApiCalls.Answer answer = api.execute(
@@ -40,7 +40,7 @@ public class ServiceModule {
         try {
             return objectMapper.readValue(answer.body, NewContractsPricing.class);
         } catch (IOException e) {
-            throw new UncheckedIOException("Unexpected answer from SPACE: " + e.getMessage(), e);
+            throw new SpaceException("Unexpected answer from SPACE: " + e.getMessage(), e);
         }
     }
 }
