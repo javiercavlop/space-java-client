@@ -388,19 +388,23 @@ if (!preview.isValid()) {
   novation into an unconditional one. For an unconditional novation, do not set it.
   `keepBillingPeriod(true)` sends `?keepBillingPeriod=true`: history is still recorded but the
   billing period is not restarted.
+- `rejectPrivate(true)` sends `?rejectPrivate=true`, asking SPACE to refuse private plans and
+  add-ons. Rejection is opt-in: without it SPACE accepts them, as before. The same options can be
+  passed to the preview: `previewNovation(userId, subscription, options)`.
 - `novate` throws on every failure. The existing `updateContractSubscription(userId, subscription)`
   is unchanged: unconditional, one PUT, and `null` on failure.
 - `Contract.getContractVersion()` is filled from the body or, failing that, from the `ETag` of
   the update response. It is `null` on SPACE versions without it.
 
-> **Older SPACE versions.** A SPACE without optimistic concurrency ignores `If-Match`, and one
-> without `keepBillingPeriod` ignores the query and restarts the billing period. So `novate` does
-> not trust the options blindly. When `expectedContractVersion` or `keepBillingPeriod` is set:
+> **Older SPACE versions.** A SPACE without optimistic concurrency ignores `If-Match`, one without
+> `keepBillingPeriod` ignores the query and restarts the billing period, and one without
+> `rejectPrivate` accepts private plans. So `novate` does not trust the options blindly. When
+> `expectedContractVersion`, `keepBillingPeriod` or `rejectPrivate` is set:
 >
 > - **Before writing** it checks the `X-Space-Capabilities` header for `contract-version` /
->   `keep-billing-period`. The header is read from any SPACE response and cached per client for
->   `SpaceClient.CAPABILITIES_TTL_MS` (60 s; `client.clearCapabilities()` forgets it). When nothing
->   recent is known it reads the contract once. If a token is missing it throws
+>   `keep-billing-period` / `reject-private`. The header is read from any SPACE response and
+>   cached per client for `SpaceClient.CAPABILITIES_TTL_MS` (60 s; `client.clearCapabilities()`
+>   forgets it). When nothing recent is known it reads the contract once. If a token is missing it throws
 >   `SpaceFeatureUnsupportedException` (`getCapability()`, `isWritten() == false`) and **writes
 >   nothing**. If that read's `ETag` already differs from the expected version it throws
 >   `ContractChangedException` early; `If-Match` on the PUT is still the atomic check.
@@ -408,8 +412,8 @@ if (!preview.isValid()) {
 >   the stored `getContract()` if the answer shows the option was ignored anyway: no `ETag` with an
 >   expected version, or a different `billingPeriod.startDate` with `keepBillingPeriod`. The
 >   user's cache entries are dropped.
-> - `previewNovation(userId, subscription, true)` throws the same exception when the SPACE that
->   answered does not advertise `keep-billing-period`.
+> - `previewNovation` with `keepBillingPeriod` or `rejectPrivate` throws the same exception when
+>   the SPACE that answered does not advertise `keep-billing-period` / `reject-private`.
 >
 > With no option set, nothing is checked and the request is a single PUT.
 
@@ -460,8 +464,8 @@ Manage user contracts.
 - `getContract(String userId)`: Retrieve user contract
 - `addContract(ContractToCreate contract)`: Create new contract
 - `updateContractSubscription(String userId, Subscription subscription)`: Update subscription (unconditional; `null` on failure)
-- `novate(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`) and `keepBillingPeriod`; throws on failure, and `SpaceFeatureUnsupportedException` when SPACE cannot honour an option
-- `previewNovation(String userId, Subscription subscription[, boolean keepBillingPeriod])`: Dry run (`NovationPreview`)
+- `novate(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`), `keepBillingPeriod` and `rejectPrivate`; throws on failure, and `SpaceFeatureUnsupportedException` when SPACE cannot honour an option
+- `previewNovation(String userId, Subscription subscription[, boolean keepBillingPeriod | NovationOptions options])`: Dry run (`NovationPreview`); `options` carries `keepBillingPeriod` and `rejectPrivate`
 - `getPricings(String userId)`: Pricing version, status, plan and add-ons of every service of the contract, plus its `contractVersion` (`ContractPricings`)
 
 ### PricingModule

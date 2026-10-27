@@ -603,4 +603,104 @@ class NovationTest {
                 });
         assertThat(client.contracts.previewNovation("u1", change()).isValid()).isFalse();
     }
+
+    // -- S8: rejectPrivate (opt-in) ----------------------------------------
+    //
+    // Rejecting private plans/add-ons is opt-in on the server (rejectPrivate=true, capability
+    // reject-private). A SPACE that does not know it would accept a private plan silently, so the
+    // client refuses rather than send it.
+
+    private static final String WITH_REJECT_PRIVATE = CAPABILITIES + ",reject-private";
+
+    @Test
+    @DisplayName("novate can ask SPACE to reject private plans (rejectPrivate=true)")
+    void novateRejectPrivate() throws Exception {
+        newSpaceContract("3");
+        nextGet.setHeader("X-Space-Capabilities", WITH_REJECT_PRIVATE);
+        next = written(CONTRACT + "}", "\"4\"").setHeader("X-Space-Capabilities", WITH_REJECT_PRIVATE);
+
+        client.contracts.novate("u1", change(),
+                NovationOptions.expecting("3").keepBillingPeriod(true).rejectPrivate(true));
+
+        RecordedRequest request = nextWrite();
+        assertThat(request.getRequestUrl().queryParameter("rejectPrivate")).isEqualTo("true");
+        assertThat(request.getRequestUrl().queryParameter("keepBillingPeriod")).isEqualTo("true");
+        assertThat(request.getHeader("If-Match")).isEqualTo("\"3\"");
+    }
+
+    @Test
+    @DisplayName("rejectPrivate alone is checked too, and sends nothing else")
+    void novateRejectPrivateAlone() throws Exception {
+        newSpaceContract("3");
+        nextGet.setHeader("X-Space-Capabilities", WITH_REJECT_PRIVATE);
+        next = written(CONTRACT + "}", "\"4\"");
+
+        client.contracts.novate("u1", change(), new NovationOptions().rejectPrivate(true));
+
+        RecordedRequest request = nextWrite();
+        assertThat(request.getPath()).isEqualTo("/api/v1/contracts/u1?rejectPrivate=true");
+        assertThat(request.getHeader("If-Match")).isNull();
+        assertThat(count("GET /api/v1/contracts/u1")).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    @DisplayName("A SPACE without reject-private gets no write")
+    void novateRejectPrivateUnsupported(boolean hasOtherCapabilities) {
+        if (hasOtherCapabilities) {
+            newSpaceContract("3");  // contract-version and keep-billing-period, not reject-private
+        } else {
+            nextGet = json(200, CONTRACT + "}");  // no X-Space-Capabilities at all
+        }
+        next = written(CONTRACT + "}", "\"4\"");
+
+        assertThatThrownBy(() -> client.contracts.novate("u1", change(), new NovationOptions().rejectPrivate(true)))
+                .isInstanceOf(SpaceFeatureUnsupportedException.class)
+                .hasMessageContaining("rejectPrivate")
+                .satisfies(error -> {
+                    SpaceFeatureUnsupportedException e = (SpaceFeatureUnsupportedException) error;
+                    assertThat(e.getCapability()).isEqualTo("reject-private");
+                    assertThat(e.isWritten()).isFalse();
+                });
+        assertThat(count("PUT ")).isZero();
+    }
+
+    @Test
+    @DisplayName("previewNovation can reject private plans on a SPACE that supports it")
+    void previewRejectPrivate() throws Exception {
+        next = json(200, PREVIEW).setHeader("X-Space-Capabilities", WITH_REJECT_PRIVATE);
+
+        NovationPreview preview = client.contracts.previewNovation("u1", change(),
+                new NovationOptions().rejectPrivate(true));
+
+        RecordedRequest request = nextWrite();
+        assertThat(request.getPath()).isEqualTo("/api/v1/contracts/u1/novation/preview?rejectPrivate=true");
+        assertThat(preview.isValid()).isFalse();
+    }
+
+    @Test
+    @DisplayName("previewNovation with rejectPrivate on a SPACE without it throws")
+    void previewRejectPrivateUnsupported() {
+        next = json(200, PREVIEW).setHeader("X-Space-Capabilities", CAPABILITIES);
+
+        assertThatThrownBy(() -> client.contracts.previewNovation("u1", change(),
+                new NovationOptions().keepBillingPeriod(true).rejectPrivate(true)))
+                .isInstanceOf(SpaceFeatureUnsupportedException.class)
+                .satisfies(error -> {
+                    SpaceFeatureUnsupportedException e = (SpaceFeatureUnsupportedException) error;
+                    assertThat(e.getCapability()).isEqualTo("reject-private");
+                    assertThat(e.isWritten()).isFalse();
+                });
+    }
+
+    @Test
+    @DisplayName("Without rejectPrivate nothing is sent or checked")
+    void noRejectPrivateByDefault() throws Exception {
+        next = json(200, PREVIEW);
+
+        client.contracts.previewNovation("u1", change(), new NovationOptions());
+
+        assertThat(nextWrite().getPath()).isEqualTo("/api/v1/contracts/u1/novation/preview");
+        assertThat(new NovationOptions().isRejectPrivate()).isFalse();
+    }
 }

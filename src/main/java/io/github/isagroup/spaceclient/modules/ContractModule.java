@@ -37,6 +37,8 @@ public class ContractModule {
     public static final String CONTRACT_VERSION = "contract-version";
     /** {@code X-Space-Capabilities} token of keeping the billing period (S8). */
     public static final String KEEP_BILLING_PERIOD = "keep-billing-period";
+    /** {@code X-Space-Capabilities} token of the opt-in rejection of private plans/add-ons (S8). */
+    public static final String REJECT_PRIVATE = "reject-private";
     
     private final SpaceClient spaceClient;
     private final OkHttpClient httpClient;
@@ -226,9 +228,9 @@ public class ContractModule {
      * Unlike {@link #updateContractSubscription(String, Subscription)}, failures are thrown, not
      * logged and returned as {@code null}, so a 412 cannot be mistaken for any other failure.
      *
-     * Both options need a SPACE that implements them ({@code X-Space-Capabilities} tokens
-     * {@value #CONTRACT_VERSION} and {@value #KEEP_BILLING_PERIOD}). Before writing, the client
-     * checks them, from any response of the last {@link SpaceClient#CAPABILITIES_TTL_MS} or by
+     * The options need a SPACE that implements them ({@code X-Space-Capabilities} tokens
+     * {@value #CONTRACT_VERSION}, {@value #KEEP_BILLING_PERIOD} and {@value #REJECT_PRIVATE}). Before
+     * writing, the client checks them, from any response of the last {@link SpaceClient#CAPABILITIES_TTL_MS} or by
      * reading the contract once (which also lets a stale expected version fail early), and throws
      * {@link SpaceFeatureUnsupportedException} without writing if one is missing. After writing it
      * checks the answer: no {@code ETag} with an expected version, or a different
@@ -238,8 +240,9 @@ public class ContractModule {
      *
      * @param userId          The ID of the user whose subscription is to be updated
      * @param newSubscription The new subscription details to be applied
-     * @param options         {@code expectedContractVersion} (sent as {@code If-Match}) and
+     * @param options         {@code expectedContractVersion} (sent as {@code If-Match}),
      *                        {@code keepBillingPeriod} (sent as {@code ?keepBillingPeriod=true})
+     *                        and {@code rejectPrivate} (sent as {@code ?rejectPrivate=true})
      * @return The updated contract, with {@code contractVersion} from the body or the {@code ETag}
      * @throws ContractChangedException          if the contract changed since {@code expectedContractVersion}
      * @throws SpaceFeatureUnsupportedException  if SPACE does not implement a requested option
@@ -255,6 +258,9 @@ public class ContractModule {
         okhttp3.HttpUrl.Builder url = api.url("contracts", userId);
         if (opts.isKeepBillingPeriod()) {
             url.addQueryParameter("keepBillingPeriod", "true");
+        }
+        if (opts.isRejectPrivate()) {
+            url.addQueryParameter("rejectPrivate", "true");
         }
         Request.Builder request = api.request(url.build()).put(RequestBody.create(toJson(newSubscription), JSON));
         if (expected != null) {
@@ -313,6 +319,9 @@ public class ContractModule {
         if (opts.isKeepBillingPeriod()) {
             required.add(KEEP_BILLING_PERIOD);
         }
+        if (opts.isRejectPrivate()) {
+            required.add(REJECT_PRIVATE);
+        }
         if (required.isEmpty()) {
             return null;
         }
@@ -346,12 +355,17 @@ public class ContractModule {
     private static void requireAll(List<String> required, Set<String> capabilities) {
         for (String capability : required) {
             if (!capabilities.contains(capability)) {
-                String option = CONTRACT_VERSION.equals(capability)
-                        ? "expectedContractVersion (If-Match)" : "keepBillingPeriod";
                 throw new SpaceFeatureUnsupportedException(capability,
-                        "The connected SPACE does not support " + option + ": nothing was written");
+                        "The connected SPACE does not support " + optionOf(capability) + ": nothing was written");
             }
         }
+    }
+
+    private static String optionOf(String capability) {
+        if (CONTRACT_VERSION.equals(capability)) {
+            return "expectedContractVersion (If-Match)";
+        }
+        return KEEP_BILLING_PERIOD.equals(capability) ? "keepBillingPeriod" : "rejectPrivate";
     }
 
     /**
@@ -409,9 +423,28 @@ public class ContractModule {
      *         answered does not advertise {@value #KEEP_BILLING_PERIOD}
      */
     public NovationPreview previewNovation(String userId, Subscription newSubscription, boolean keepBillingPeriod) {
+        return previewNovation(userId, newSubscription, new NovationOptions().keepBillingPeriod(keepBillingPeriod));
+    }
+
+    /**
+     * {@link #previewNovation(String, Subscription)} with the options of the novation it previews:
+     * {@code keepBillingPeriod} ({@code ?keepBillingPeriod=true}) and {@code rejectPrivate}
+     * ({@code ?rejectPrivate=true}). {@code expectedContractVersion} is ignored: a dry run writes
+     * nothing.
+     *
+     * @throws SpaceFeatureUnsupportedException when an option is set and the SPACE that answered
+     *         does not advertise its capability ({@value #KEEP_BILLING_PERIOD},
+     *         {@value #REJECT_PRIVATE}): the preview would describe a result the novation would not
+     *         have
+     */
+    public NovationPreview previewNovation(String userId, Subscription newSubscription, NovationOptions options) {
+        NovationOptions opts = options != null ? options : new NovationOptions();
         okhttp3.HttpUrl.Builder url = api.url("contracts", userId, "novation", "preview");
-        if (keepBillingPeriod) {
+        if (opts.isKeepBillingPeriod()) {
             url.addQueryParameter("keepBillingPeriod", "true");
+        }
+        if (opts.isRejectPrivate()) {
+            url.addQueryParameter("rejectPrivate", "true");
         }
         Map<String, Object> body = new LinkedHashMap<>();
         if (newSubscription.getContractedServices() != null && !newSubscription.getContractedServices().isEmpty()) {
@@ -421,12 +454,19 @@ public class ContractModule {
         body.put("subscriptionAddOns", newSubscription.getSubscriptionAddOns());
 
         ApiCalls.Answer answer = api.execute(api.request(url.build()).post(RequestBody.create(toJson(body), JSON)).build());
-        if (keepBillingPeriod) {
-            Set<String> capabilities = spaceClient.getCachedCapabilities();
-            if (capabilities == null || !capabilities.contains(KEEP_BILLING_PERIOD)) {
-                // The preview would describe a restart while the caller asked to keep the period.
-                throw new SpaceFeatureUnsupportedException(KEEP_BILLING_PERIOD,
-                        "The connected SPACE does not support keepBillingPeriod: the preview ignored it");
+        List<String> required = new ArrayList<>();
+        if (opts.isKeepBillingPeriod()) {
+            required.add(KEEP_BILLING_PERIOD);
+        }
+        if (opts.isRejectPrivate()) {
+            required.add(REJECT_PRIVATE);
+        }
+        Set<String> capabilities = spaceClient.getCachedCapabilities();
+        for (String capability : required) {
+            if (capabilities == null || !capabilities.contains(capability)) {
+                // The preview would describe a result the novation would not have.
+                throw new SpaceFeatureUnsupportedException(capability,
+                        "The connected SPACE does not support " + optionOf(capability) + ": the preview ignored it");
             }
         }
         return fromJson(answer.body, NovationPreview.class);

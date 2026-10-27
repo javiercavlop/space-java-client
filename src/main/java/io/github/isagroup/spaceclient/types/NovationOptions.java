@@ -12,6 +12,7 @@ public class NovationOptions {
 
     private String expectedContractVersion;
     private boolean keepBillingPeriod;
+    private boolean rejectPrivate;
 
     public NovationOptions() {
     }
@@ -52,6 +53,19 @@ public class NovationOptions {
     public NovationOptions keepBillingPeriod(boolean keepBillingPeriod) {
         this.keepBillingPeriod = keepBillingPeriod;
         return this;
+    }
+
+    /**
+     * Ask SPACE to reject private plans and add-ons ({@code ?rejectPrivate=true}). Opt-in: by
+     * default SPACE accepts them, as before. Applies to the novation and to its preview.
+     */
+    public NovationOptions rejectPrivate(boolean rejectPrivate) {
+        this.rejectPrivate = rejectPrivate;
+        return this;
+    }
+
+    public boolean isRejectPrivate() {
+        return rejectPrivate;
     }
 
     public String getExpectedContractVersion() {
