@@ -21,6 +21,7 @@ import java.net.URISyntaxException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * The SpaceClient class provides an interface to interact with the Space API and WebSocket services
@@ -45,6 +46,17 @@ public class SpaceClient {
     
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
+
+    /**
+     * How long the capabilities a SPACE response advertises ({@code X-Space-Capabilities}) are
+     * trusted before the client checks them again.
+     */
+    public static final long CAPABILITIES_TTL_MS = 60_000L;
+
+    /** The capabilities last seen on a SPACE response, or {@code null} if unknown. */
+    private volatile Set<String> capabilities;
+    private volatile long capabilitiesSeenAt;
+    private volatile LongSupplier clock = System::currentTimeMillis;
     
     public final CacheModule cache;
     public final ContractModule contracts;
@@ -267,6 +279,54 @@ public class SpaceClient {
             httpClient.dispatcher().executorService().shutdown();
             httpClient.connectionPool().evictAll();
         }
+    }
+
+    /**
+     * Records the capabilities advertised by a SPACE response ({@code X-Space-Capabilities}, see S0
+     * of the design). A successful response without the header comes from a SPACE that predates
+     * it, i.e. one that implements none of the advertised features; a refusal without it is
+     * ignored, since it may come from a proxy. Called by the modules for every response.
+     *
+     * @param header     the header value, or {@code null} if absent
+     * @param successful whether the response was a 2xx/3xx
+     */
+    public void observeCapabilities(String header, boolean successful) {
+        if (header == null && !successful) {
+            return;
+        }
+        Set<String> tokens = new HashSet<>();
+        if (header != null) {
+            for (String token : header.split(",")) {
+                String trimmed = token.trim().toLowerCase(Locale.ROOT);
+                if (!trimmed.isEmpty()) {
+                    tokens.add(trimmed);
+                }
+            }
+        }
+        capabilitiesSeenAt = clock.getAsLong();
+        capabilities = Collections.unmodifiableSet(tokens);
+    }
+
+    /**
+     * The capabilities seen on a SPACE response less than {@link #CAPABILITIES_TTL_MS} ago, or
+     * {@code null} if they have to be checked again.
+     */
+    public Set<String> getCachedCapabilities() {
+        Set<String> known = capabilities;
+        if (known == null || clock.getAsLong() - capabilitiesSeenAt >= CAPABILITIES_TTL_MS) {
+            return null;
+        }
+        return known;
+    }
+
+    /** Forgets the cached capabilities, e.g. right after upgrading SPACE. */
+    public void clearCapabilities() {
+        capabilities = null;
+    }
+
+    /** Replaces the clock of the capability cache (tests only). */
+    void setClockForTesting(LongSupplier clock) {
+        this.clock = clock;
     }
 
     // Getters

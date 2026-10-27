@@ -53,6 +53,7 @@ final class ApiCalls {
             ResponseBody responseBody = response.body();
             String body = responseBody != null ? responseBody.string() : null;
             int code = response.code();
+            spaceClient.observeCapabilities(response.header("X-Space-Capabilities"), code >= 200 && code < 400);
             if ((code < 200 || code >= 300) && !accept.contains(code)) {
                 throw new SpaceApiException(code, request.method(), pathOf(request.url()), body);
             }

@@ -350,6 +350,7 @@ changed the contract in between, SPACE answers 412 and the client throws
 
 ```java
 import io.github.isagroup.spaceclient.exceptions.ContractChangedException;
+import io.github.isagroup.spaceclient.exceptions.SpaceFeatureUnsupportedException;
 import io.github.isagroup.spaceclient.types.*;
 
 Subscription change = new Subscription();          // contractedServices left empty:
@@ -364,12 +365,17 @@ if (!preview.isValid()) {
     }
 } else {
     try {
-        Contract updated = client.contracts.updateContractSubscription("user123", preview.getEffective(),
+        Contract updated = client.contracts.novate("user123", preview.getEffective(),
                 NovationOptions.expecting(preview.getContractVersion()).keepBillingPeriod(true));
         updated.getContractVersion(); // the new version
     } catch (ContractChangedException e) {
         // Changed meanwhile: re-read, show the customer, ask again.
         System.out.println("Current version: " + e.getContractVersion());
+    } catch (SpaceFeatureUnsupportedException e) {
+        // This SPACE cannot honour the option (e.getCapability()).
+        if (e.isWritten()) {
+            // The change WAS applied without the guarantee: e.getContract()
+        }
     }
 }
 ```
@@ -377,12 +383,35 @@ if (!preview.isValid()) {
 - `previewNovation` writes nothing and leaves the cache alone. An invalid change is an answer
   (`isValid() == false`), not an exception. Unknown error codes are kept as strings
   (`getKnownCode()` returns `null` for them).
-- The expected version is sent as `If-Match`. `keepBillingPeriod(true)` sends
-  `?keepBillingPeriod=true`: history is still recorded but the billing period is not restarted.
-- The new three-argument `updateContractSubscription` throws on refusals. The existing
-  two-argument overload is unchanged: unconditional, and `null` on failure.
+- The expected version is sent as `If-Match`. `NovationOptions.expecting(null)` or `""` throws
+  `IllegalArgumentException`: a version that was never known must not quietly turn a conditional
+  novation into an unconditional one. For an unconditional novation, do not set it.
+  `keepBillingPeriod(true)` sends `?keepBillingPeriod=true`: history is still recorded but the
+  billing period is not restarted.
+- `novate` throws on every failure. The existing `updateContractSubscription(userId, subscription)`
+  is unchanged: unconditional, one PUT, and `null` on failure.
 - `Contract.getContractVersion()` is filled from the body or, failing that, from the `ETag` of
   the update response. It is `null` on SPACE versions without it.
+
+> **Older SPACE versions.** A SPACE without optimistic concurrency ignores `If-Match`, and one
+> without `keepBillingPeriod` ignores the query and restarts the billing period. So `novate` does
+> not trust the options blindly. When `expectedContractVersion` or `keepBillingPeriod` is set:
+>
+> - **Before writing** it checks the `X-Space-Capabilities` header for `contract-version` /
+>   `keep-billing-period`. The header is read from any SPACE response and cached per client for
+>   `SpaceClient.CAPABILITIES_TTL_MS` (60 s; `client.clearCapabilities()` forgets it). When nothing
+>   recent is known it reads the contract once. If a token is missing it throws
+>   `SpaceFeatureUnsupportedException` (`getCapability()`, `isWritten() == false`) and **writes
+>   nothing**. If that read's `ETag` already differs from the expected version it throws
+>   `ContractChangedException` early; `If-Match` on the PUT is still the atomic check.
+> - **After writing** it throws `SpaceFeatureUnsupportedException` with `isWritten() == true` and
+>   the stored `getContract()` if the answer shows the option was ignored anyway: no `ETag` with an
+>   expected version, or a different `billingPeriod.startDate` with `keepBillingPeriod`. The
+>   user's cache entries are dropped.
+> - `previewNovation(userId, subscription, true)` throws the same exception when the SPACE that
+>   answered does not advertise `keep-billing-period`.
+>
+> With no option set, nothing is checked and the request is a single PUT.
 
 `getYaml` throws `PricingYamlUnavailableException` when SPACE knows the version but no longer has
 its original file. `getPricings` is never served from cache.
@@ -430,8 +459,8 @@ Manage user contracts.
 **Methods:**
 - `getContract(String userId)`: Retrieve user contract
 - `addContract(ContractToCreate contract)`: Create new contract
-- `updateContractSubscription(String userId, Subscription subscription)`: Update subscription
-- `updateContractSubscription(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`) and `keepBillingPeriod`
+- `updateContractSubscription(String userId, Subscription subscription)`: Update subscription (unconditional; `null` on failure)
+- `novate(String userId, Subscription subscription, NovationOptions options)`: Novation with `expectedContractVersion` (`If-Match`, 412 -> `ContractChangedException`) and `keepBillingPeriod`; throws on failure, and `SpaceFeatureUnsupportedException` when SPACE cannot honour an option
 - `previewNovation(String userId, Subscription subscription[, boolean keepBillingPeriod])`: Dry run (`NovationPreview`)
 - `getPricings(String userId)`: Pricing version, status, plan and add-ons of every service of the contract, plus its `contractVersion` (`ContractPricings`)
 
@@ -471,7 +500,7 @@ Available WebSocket events:
 ## Error Handling
 
 The methods of the subscription-change API (`pricings.getYaml`, `contracts.getPricings`,
-`contracts.previewNovation`, `contracts.updateContractSubscription(userId, subscription, options)`,
+`contracts.previewNovation`, `contracts.novate`,
 `services.getNewContractsPricing`) throw unchecked exceptions instead
 of returning `null`:
 
@@ -481,13 +510,15 @@ All of them extend `SpaceException` (unchecked), so one `catch` handles every fa
   `getPath()`, `getBody()` and `getErrorCode()` (the `error` field of a JSON body).
 - `PricingYamlUnavailableException` (a `SpaceApiException`): `404 PRICING_YAML_UNAVAILABLE`.
 - `ContractChangedException` (a `SpaceApiException`): `412 CONTRACT_CHANGED` on a conditional
-  novation. Carries `getUserId()`, `getExpectedContractVersion()` and the current
-  `getContractVersion()`; the user's cache entries are invalidated.
+  novation (or the same conflict seen on the read before it). Carries `getUserId()`,
+  `getExpectedContractVersion()` and the current `getContractVersion()`; the user's cache entries
+  are invalidated.
 - `SpaceConnectionException`: SPACE could not be reached (the `IOException` is the cause).
 - `SpaceFeatureUnsupportedException`: the connected SPACE lacks a feature the call depends on.
   `getCapability()` is its `X-Space-Capabilities` token (e.g. `pricing-yaml` when `getYaml`
-  receives JSON from a SPACE that ignores `format=yaml`); `isWritten()` says whether SPACE changed
-  anything.
+  receives JSON from a SPACE that ignores `format=yaml`, or `contract-version` /
+  `keep-billing-period` from `novate`); `isWritten()` says whether SPACE changed anything, and
+  `getContract()` is what it stored when it did.
 - `SpaceException` itself: SPACE answered 2xx with a body the client cannot read.
 
 The older methods keep their existing behaviour (they log the failure and return `null`):
