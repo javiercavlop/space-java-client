@@ -1,5 +1,7 @@
 package io.github.isagroup.spaceclient.types;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -9,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -16,6 +19,11 @@ import java.util.Map;
  *
  * {@link #decode(String)} reads the payload WITHOUT verifying the signature: use it to read a token
  * you just received from SPACE, never to authenticate one a caller sent you.
+ *
+ * {@code sub} is opaque: SPACE versions with per-organization userIds (capability
+ * {@code contract-userid-per-org}) send {@code urn:space:<organizationId>:<percent-encoded userId>},
+ * older versions the bare userId. Use {@link #resolveUserId()} for the userId. {@code userId},
+ * {@code organizationId}, {@code aud} and {@code iss} are {@code null} in tokens of older versions.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class PricingTokenPayload {
@@ -25,6 +33,19 @@ public class PricingTokenPayload {
 
     @JsonProperty("sub")
     private String sub;
+
+    @JsonProperty("userId")
+    private String userId;
+
+    @JsonProperty("organizationId")
+    private String organizationId;
+
+    @JsonProperty("aud")
+    @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
+    private List<String> aud;
+
+    @JsonProperty("iss")
+    private String iss;
 
     @JsonProperty("iat")
     private Long iat;
@@ -73,13 +94,71 @@ public class PricingTokenPayload {
         }
     }
 
-    /** The userId of the contract. */
+    /**
+     * The subject of the token. Opaque: do not parse it and do not use it as the userId. SPACE
+     * versions with per-organization userIds send {@code urn:space:<organizationId>:<percent-encoded
+     * userId>}; older versions send the bare userId. See {@link #resolveUserId()}.
+     */
     public String getSub() {
         return sub;
     }
 
     public void setSub(String sub) {
         this.sub = sub;
+    }
+
+    /**
+     * The userId the token was issued for: the {@code userId} claim, or {@code sub} only when the
+     * token has no {@code userId} claim (issued by a SPACE version that predates per-organization
+     * userIds, where {@code sub} is the bare userId). {@code sub} is never parsed.
+     *
+     * @return The userId, or {@code null} if the token has neither claim
+     */
+    @JsonIgnore
+    public String resolveUserId() {
+        return userId != null ? userId : sub;
+    }
+
+    /**
+     * Claim {@code userId}: the userId as stored in SPACE (not encoded). {@code null} in tokens of
+     * older SPACE versions; prefer {@link #resolveUserId()}.
+     */
+    public String getUserId() {
+        return userId;
+    }
+
+    public void setUserId(String userId) {
+        this.userId = userId;
+    }
+
+    /** Claim {@code organizationId}: the organization of the contract ({@code null} in older tokens). */
+    public String getOrganizationId() {
+        return organizationId;
+    }
+
+    public void setOrganizationId(String organizationId) {
+        this.organizationId = organizationId;
+    }
+
+    /**
+     * Claim {@code aud}: the organization the token is for (the same value as
+     * {@code organizationId}), as a list ({@code null} in older tokens).
+     */
+    public List<String> getAud() {
+        return aud;
+    }
+
+    public void setAud(List<String> aud) {
+        this.aud = aud;
+    }
+
+    /** Claim {@code iss}: the SPACE server ({@code JWT_ISSUER}, {@code space} by default; {@code null} in older tokens). */
+    public String getIss() {
+        return iss;
+    }
+
+    public void setIss(String iss) {
+        this.iss = iss;
     }
 
     public Long getIat() {

@@ -466,6 +466,31 @@ if (subscription != null) {
 `decode` does **not** verify the signature: use it to read a token you just received from SPACE,
 never to authenticate one a caller sent you.
 
+#### Token claims: `userId`, `organizationId`, `aud`, `iss`
+
+A userId is unique only within its organization, so SPACE versions with per-organization userIds
+(capability `contract-userid-per-org`) issue tokens with these claims:
+
+| Claim | Getter | Value |
+| --- | --- | --- |
+| `sub` | `getSub()` | `urn:space:<organizationId>:<percent-encoded userId>`. Opaque: do not parse it. |
+| `userId` | `getUserId()` | The userId as stored in SPACE (not encoded). |
+| `organizationId` | `getOrganizationId()` | The organization of the contract. |
+| `aud` | `getAud()` | The organization the token is for (same value as `organizationId`), as a list. |
+| `iss` | `getIss()` | The SPACE server: its `JWT_ISSUER`, `space` by default. |
+
+Tokens of older SPACE versions only have the bare userId in `sub`; the other getters then return
+`null`. `resolveUserId()` returns `getUserId()` and falls back to `getSub()` only when the token has
+no `userId` claim (an older server); it never parses the URN. Code that used `getSub()` as the
+userId should switch to it:
+
+```java
+String userId = PricingTokenPayload.decode(token).resolveUserId();
+```
+
+When a token is checked on the server side, also compare `getOrganizationId()` (or `getAud()`) with
+your organization: the same userId can exist in another organization of the same SPACE.
+
 ### Cleanup
 
 Always close the client when done to release resources:
